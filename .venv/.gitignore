@@ -1,0 +1,22 @@
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE配置
+.idea/
+.vscode/
+*.iml
+
+# 打包、缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+dist/
+build/
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
