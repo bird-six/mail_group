@@ -49,7 +49,9 @@ def write_delivery_files():
     OUTPUT.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / 'release/桌面版使用说明.txt', OUTPUT / '使用说明.txt')
     entries = []
-    for path in sorted(OUTPUT.glob('MailGroup-*.exe')):
+    version = json.loads((ROOT / 'desktop/package.json').read_text(encoding='utf-8'))['version']
+    for kind in ('nsis', 'update', 'portable'):
+        path = OUTPUT / f'MailGroup-{version}-x64-{kind}.exe'
         with path.open('rb') as stream:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         entries.append(f'{digest}  {path.name}')
@@ -83,7 +85,10 @@ def main():
     run([python, '-B', '-m', 'PyInstaller', '--noconfirm', '--distpath', ROOT / 'build/backend',
          '--workpath', ROOT / 'build/pyinstaller', ROOT / 'backend/desktop-service.spec'])
     run([npm, 'run', 'dist'], ROOT / 'desktop')
+    run([npm, 'run', 'dist:update'], ROOT / 'desktop')
     write_delivery_files()
+    if args.verify:
+        run([python, '-B', ROOT / 'diagnostics/installer_upgrade_smoke.py'])
     print(f'Ready: {OUTPUT}', flush=True)
 
 

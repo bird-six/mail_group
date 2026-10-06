@@ -293,7 +293,7 @@ async def lifespan(_app: FastAPI):
         _shared_conn = None
 
 
-app = FastAPI(title="邮件群发助手", version="3.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="邮件群发助手", version="3.2.1", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 if DEV_ORIGIN:
     app.add_middleware(CORSMiddleware, allow_origins=[DEV_ORIGIN], allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"])
 

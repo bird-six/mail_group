@@ -8,16 +8,32 @@ Windows 10 / 11 x64 桌面应用，提供邮箱管理、批量收件人导入、
 
 打开 `release/desktop-v3`，选择其中一种：
 
-- `MailGroup-3.2.0-x64-portable.exe`：双击启动，免安装。
-- `MailGroup-3.2.0-x64-nsis.exe`：运行安装向导，之后从桌面快捷方式启动。
+- `MailGroup-3.2.1-x64-nsis.exe`：首次安装或修复安装，完成后从桌面快捷方式启动。
+- `MailGroup-3.2.1-x64-update.exe`：已安装 3.0 / 3.1 / 3.2 桌面版的用户使用，保留数据并沿用原安装位置。
+- `MailGroup-3.2.1-x64-portable.exe`：双击启动，免安装。
 
-两个版本均包含 Electron、Python 和后端依赖，使用者不需要开发环境。
+三个文件均包含完整 Electron、Python 和后端依赖，安装/升级不需要联网下载组件或配置开发环境。
 实际投递需要网络、可使用 SMTP 的邮箱与授权码。
 应用内“使用说明”提供操作目录、配置步骤和常见问题；离线手册见 [桌面版使用说明](release/桌面版使用说明.txt)，打包后同一份手册位于 `release/desktop-v3/使用说明.txt`。
 
 数据默认位于 `%APPDATA%\MailGroup\data`，可点击窗口顶部文件夹按钮打开。
 关闭应用后备份整个 data 目录；新安装包不含个人数据。旧版迁移步骤见使用说明。
 Git 仓库仅维护源码、构建脚本和合成测试；安装包与运行数据保留在本地。旧版运行目录不再提交。
+
+## 已安装用户升级（保留数据）
+
+1. 在旧版顶部点击文件夹按钮，确认数据位置。正常退出应用；有任务时选择“暂停并退出”并等待窗口关闭。
+2. 备份整个 `data` 文件夹，包括数据库和附件。**无需先卸载旧版。**
+3. 双击 `MailGroup-3.2.1-x64-update.exe`，沿用检测到的安装位置和安装范围完成升级。
+4. 从原快捷方式启动，核对账号、收件人、模板、附件、任务与邮件汇总。未完成任务仍需手动恢复，升级不会主动发信。
+
+升级包是完整离线替换包，大小与安装包接近，可跨 3.x 版本升级；其数据目录和应用标识保持不变。
+3.2.0 → 3.2.1 不变更数据库结构；更早数据库首次启动时会自动迁移并生成对应的 SQLite 备份。
+安装器检测到应用或本地服务仍在运行时会停止，待正常退出后重新运行；不强制结束任务。
+未找到已安装桌面版时，升级包会提示使用完整安装包；免安装用户改用新版 portable 文件即可保留默认数据。
+如果同时安装了“当前用户”和“所有用户”两份程序，请用完整安装包选择对应范围。
+使用 `--user-data-dir` 自定义配置的用户，升级后须继续使用原启动参数；升级包不会移动自定义数据。
+早期 Python/文件夹版 `backend/data` 的迁移方法见离线手册。完整目录备份用于故障恢复，数据库自动备份不能替代附件备份。
 
 ## 第一次群发
 
@@ -105,7 +121,7 @@ python release/build_desktop.py --verify
 ```
 
 脚本创建 `.venv`、安装锁定依赖、校验官方 Electron 下载的 SHA256，构建前端、冻结 Python 后端，
-生成安装版、免安装版、说明文件和 `SHA256SUMS.txt`。已准备好依赖时可加 `--skip-install`。
+生成安装版、保留数据的升级版、免安装版、说明文件和当前版本的 `SHA256SUMS.txt`。已准备好依赖时可加 `--skip-install`。
 PyInstaller 仅打包代码、静态界面和运行库，不复制 `backend/data`。
 此版本未配置商业代码签名证书，Windows 可能显示未知发布者提示。
 
@@ -133,6 +149,7 @@ python -m venv .venv
 ```powershell
 .venv/Scripts/python.exe -B -m pytest backend -q -p no:cacheprovider
 .venv/Scripts/python.exe -B diagnostics/run_audit_integration.py
+.venv/Scripts/python.exe -B diagnostics/installer_upgrade_smoke.py
 cd mail_group_vue3
 npm exec -- vitest run
 npm exec -- vitest run --config audit.config.ts
@@ -144,6 +161,7 @@ node_modules/electron/dist/electron.exe smoke.cjs
 
 测试使用临时数据库、模拟 SMTP / IMAP 和本机回环 IMAP 协议服务器，不连接真实邮箱或投递邮件；不验证服务商配额、账号权限或最终送达。
 集成测试使用自动生成的 example.com 地址，不依赖私人收件人清单。
+安装器测试使用随机隔离的注册表标识、临时目录与合成程序，实际执行首次安装、覆盖升级和卸载，检查数据保留、运行中阻止升级与防降级；不改动已有正式安装。
 本地验证结果和截图位于 `diagnostics/desktop-v3`，不会提交到仓库。
 
 ## 项目结构

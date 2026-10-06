@@ -40,6 +40,7 @@ diagnostics/*
 !diagnostics/repro_backend.py
 !diagnostics/run_audit_integration.py
 !diagnostics/desktop_binary_smoke.ps1
+!diagnostics/installer_upgrade_smoke.py
 backend/_verify.py
 backend/test.py
 backend/*.spec
