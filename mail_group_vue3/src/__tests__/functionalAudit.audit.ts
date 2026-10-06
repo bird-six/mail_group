@@ -40,7 +40,7 @@ function mockServer(attachmentFetch?: () => Promise<unknown>) {
     if (path === '/api/tasks' && method === 'POST') {
       const form = options.body as FormData
       const payload = JSON.parse(form.get('payload') as string)
-      submitted.push({ subject: payload.content.subject, recipients: payload.recipients.map((r: { email: string }) => r.email), files: form.getAll('attachments').map(f => (f as File).name) })
+      submitted.push({ subject: payload.content?.subject, recipients: payload.recipients.map((r: { email: string }) => r.email), files: form.getAll('attachments').map(f => (f as File).name) })
       recipient.enabled = false // Matches the real worker's success behavior.
       return response({ task_id: `audit-${submitted.length}`, status: 'completed', total: 1, success: 1, failed: 0, pending: 0, progress: 100, created_at: '2026-10-06T10:00:00', updated_at: '2026-10-06T10:00:00', assignments: [] })
     }
@@ -58,7 +58,7 @@ async function navigate(label: string) {
 
 async function selectTemplate(index: number) {
   await navigate('邮件内容')
-  await wrapper!.findAll('.saved-mail-item')[index]!.trigger('click')
+  await wrapper!.findAll('.saved-mail-item')[index]!.get('.edit-template').trigger('click')
   await flushPromises()
 }
 
@@ -79,6 +79,71 @@ afterEach(() => {
 })
 
 describe('Repaired desktop UI workflows', () => {
+  it('sends a multi-selected pool without requiring editor content or mixing editor attachments', async () => {
+    const server = mockServer(() => Promise.resolve({ ok: true, status: 200, blob: async () => new Blob(['A'], { type: 'text/plain' }) }))
+    wrapper = mount(App)
+    await flushPromises()
+    await selectTemplate(0)
+    expect(wrapper.find('.attachment-list').text()).toContain('A.txt')
+    for (const row of wrapper.findAll('.saved-mail-item')) await row.trigger('click')
+    expect(wrapper.findAll('.saved-mail-checkbox').every(box => (box.element as HTMLInputElement).checked)).toBe(true)
+    expect(wrapper.get('.mail-editor-fields').attributes('disabled')).toBeDefined()
+    await send()
+    const form = server.requests.find(r => r.path === '/api/tasks' && r.method === 'POST')!.body as FormData
+    const payload = JSON.parse(form.get('payload') as string)
+    expect(payload.template_ids).toEqual([1, 2])
+    expect(payload.content).toBeUndefined()
+    expect(form.getAll('attachments')).toEqual([])
+  })
+
+  it('supports select all, deselect and empty selection without falling back to the editor', async () => {
+    mockServer()
+    wrapper = mount(App)
+    await flushPromises()
+    await selectTemplate(1)
+    await wrapper.findAll('button').find(b => b.text() === '全选')!.trigger('click')
+    expect(wrapper.findAll('.saved-mail-checkbox').every(box => (box.element as HTMLInputElement).checked)).toBe(true)
+    await wrapper.findAll('.saved-mail-item')[0]!.trigger('click')
+    expect((wrapper.findAll('.saved-mail-checkbox')[0]!.element as HTMLInputElement).checked).toBe(false)
+    await wrapper.findAll('button').find(b => b.text() === '清空选择')!.trigger('click')
+    await navigate('首页')
+    expect(wrapper.findAll('button').find(b => b.text() === '开始群发')!.attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.send-source-summary').text()).toContain('已选 0 个')
+    await navigate('邮件内容')
+    await wrapper.get('input[name="send-mode"][value="current"]').setValue()
+    await navigate('首页')
+    expect(wrapper.findAll('button').find(b => b.text() === '开始群发')!.attributes('disabled')).toBeUndefined()
+  })
+
+  it('can send selected templates from a blank editor', async () => {
+    const server = mockServer()
+    wrapper = mount(App)
+    await flushPromises()
+    await navigate('邮件内容')
+    await wrapper.findAll('.saved-mail-checkbox')[1]!.setValue(true)
+    await send()
+    const form = server.requests.find(r => r.path === '/api/tasks' && r.method === 'POST')!.body as FormData
+    expect(JSON.parse(form.get('payload') as string).template_ids).toEqual([2])
+  })
+
+  it('removes deleted templates from the selected pool', async () => {
+    vi.stubGlobal('confirm', () => true)
+    const server = mockServer()
+    const fetch = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, options?: RequestInit) => options?.method === 'DELETE'
+      ? Promise.resolve(response({ status: 'ok' })) : fetch(url, options))
+    wrapper = mount(App)
+    await flushPromises()
+    await navigate('邮件内容')
+    await wrapper.findAll('.saved-mail-item')[1]!.trigger('click')
+    await wrapper.findAll('.saved-mail-item')[1]!.get('.delete-btn').trigger('click')
+    await flushPromises()
+    await navigate('首页')
+    expect(wrapper.get('.send-source-summary').text()).toContain('已选 0 个')
+    expect(wrapper.findAll('button').find(b => b.text() === '开始群发')!.attributes('disabled')).toBeDefined()
+    expect(server.submitted).toHaveLength(0)
+  })
+
   it('synchronizes successful recipients and blocks another send', async () => {
     const server = mockServer()
     wrapper = mount(App)

@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+from email.utils import formatdate
 from itertools import cycle
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -31,7 +32,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, ValidationError, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, ValidationError, field_validator, model_validator
+from mailbox_service import MailboxSettings, MailboxService, init_schema as init_mailbox_schema, clear_account, register_routes, save_local_sent, migrate_local_sent
 
 
 def clean_copied_email(value: object) -> object:
@@ -44,6 +46,7 @@ def clean_copied_email(value: object) -> object:
 
 
 EmailAddress = Annotated[EmailStr, BeforeValidator(clean_copied_email)]
+StoredId = Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)]
 
 
 class SenderConfig(BaseModel):
@@ -69,10 +72,19 @@ class MailContent(BaseModel):
 
 class SendTaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    content: MailContent
-    sender_ids: list[Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)]] = Field(min_length=1)
+    content: MailContent | None = None
+    template_ids: list[StoredId] = Field(default_factory=list)
+    sender_ids: list[StoredId] = Field(min_length=1)
     recipients: list[RecipientItem]
     request_id: str = Field(default_factory=lambda: uuid4().hex, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def content_source(self):
+        if bool(self.template_ids) == (self.content is not None):
+            raise ValueError("请选择当前邮件内容或至少一个随机模板，两种方式不能同时使用")
+        if len(self.template_ids) != len(set(self.template_ids)):
+            raise ValueError("不能重复选择同一邮件模板")
+        return self
 
     @field_validator("recipients")
     @classmethod
@@ -85,6 +97,9 @@ class SendTaskRequest(BaseModel):
 class Assignment(BaseModel):
     recipient: str
     sender: str
+    template_id: int | None = None
+    subject: str = ""
+    message_id: str = ""
     status: Literal["pending", "sending", "success", "failed", "uncertain"] = "pending"
     message: str = ""
     finished_at: str | None = None
@@ -120,7 +135,7 @@ class SavedMailCreate(BaseModel):
     body: str = Field(min_length=1)
 
 
-class StoredSender(BaseModel):
+class StoredSender(MailboxSettings):
     id: int
     email: str
     has_auth_code: bool = True
@@ -131,7 +146,7 @@ class StoredSender(BaseModel):
     created_at: str
 
 
-class StoredSenderCreate(BaseModel):
+class StoredSenderCreate(MailboxSettings):
     email: EmailAddress
     auth_code: str = Field(min_length=1, description="SMTP 授权码 / 邮箱密码")
     smtp_host: str = Field(default="smtp.qq.com", min_length=1)
@@ -139,7 +154,7 @@ class StoredSenderCreate(BaseModel):
     note: str = ""
 
 
-class StoredSenderUpdate(BaseModel):
+class StoredSenderUpdate(MailboxSettings):
     email: EmailAddress
     auth_code: str = ""
     smtp_host: str = Field(default="smtp.qq.com", min_length=1)
@@ -232,9 +247,17 @@ class MailAttachment:
 
 
 @dataclass
+class RuntimeTemplate:
+    template_id: int
+    content: MailContent
+    attachments: list[MailAttachment]
+    attachment_names: list[str] = field(default_factory=list)
+
+
+@dataclass
 class RuntimeTask:
     task_id: str
-    content: MailContent
+    content: MailContent | None
     senders: dict[str, SenderConfig]
     assignments: list[Assignment]
     attachments: list[MailAttachment]
@@ -243,6 +266,7 @@ class RuntimeTask:
     updated_at: str
     sender_ids: list[int] = field(default_factory=list)
     attachment_names: list[str] = field(default_factory=list)
+    templates: dict[int, RuntimeTemplate] = field(default_factory=dict)
 
 
 API_TOKEN = os.environ.get("MAIL_GROUP_API_TOKEN") or secrets.token_urlsafe(32)
@@ -269,7 +293,7 @@ async def lifespan(_app: FastAPI):
         _shared_conn = None
 
 
-app = FastAPI(title="邮件群发助手", version="3.0.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="邮件群发助手", version="3.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 if DEV_ORIGIN:
     app.add_middleware(CORSMiddleware, allow_origins=[DEV_ORIGIN], allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"])
 
@@ -361,11 +385,22 @@ def db():
             raise
 
 
+MAILBOX = MailboxService(db)
+register_routes(app, MAILBOX)
+
+
 def init_db() -> None:
     with db() as conn:
         existing_tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        backup_name = None
         if "sender_configs" in existing_tables and "task_runs" not in existing_tables:
-            backup_path = os.path.join(DATA_DIR, "before-v3.sqlite3")
+            backup_name = "before-v3.sqlite3"
+        elif "task_runs" in existing_tables and "template_snapshots" not in {row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")}:
+            backup_name = "before-v3.1.sqlite3"
+        elif "sender_configs" in existing_tables and "imap_host" not in {row["name"] for row in conn.execute("PRAGMA table_info(sender_configs)")}:
+            backup_name = "before-v3.2.sqlite3"
+        if backup_name:
+            backup_path = os.path.join(DATA_DIR, backup_name)
             if not os.path.exists(backup_path):
                 backup = sqlite3.connect(backup_path)
                 try:
@@ -411,6 +446,7 @@ def init_db() -> None:
             )
             """
         )
+        init_mailbox_schema(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS send_log (
@@ -458,8 +494,12 @@ def init_db() -> None:
             request_json TEXT NOT NULL, assignments TEXT NOT NULL, attachment_names TEXT NOT NULL,
             status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         )""")
+        task_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")}
+        if "template_snapshots" not in task_columns:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN template_snapshots TEXT NOT NULL DEFAULT '[]'")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_send_log_task ON send_log(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_send_log_time ON send_log(finished_at)")
+        migrate_local_sent(conn)
         # An accepted SMTP message cannot be inferred from an interrupted 'sending' state.
         for row in conn.execute("SELECT task_id, assignments FROM task_runs WHERE status IN ('pending','running')").fetchall():
             assignments = json.loads(row["assignments"])
@@ -512,10 +552,12 @@ def save_task_history(summary: TaskSummary, subject: str = "") -> None:
 
 
 def summary_from_row(row) -> TaskSummary:
-    content = json.loads(row["request_json"])["content"]
-    task = RuntimeTask(row["task_id"], MailContent(**content), {},
+    content = json.loads(row["request_json"]).get("content")
+    task = RuntimeTask(row["task_id"], MailContent(**content) if content else None, {},
         [Assignment(**item) for item in json.loads(row["assignments"])], [],
         row["status"], row["created_at"], row["updated_at"])
+    task.templates = {item["template_id"]: RuntimeTemplate(item["template_id"], MailContent(**item["content"]), [])
+                      for item in json.loads(row["template_snapshots"])}
     return to_summary(task)
 
 
@@ -576,6 +618,13 @@ def persist_task(task: RuntimeTask, finished: Assignment | None = None) -> None:
                 matches = [(row["id"],) for row in conn.execute("SELECT id,email FROM recipients WHERE enabled=1")
                            if normalize_email(row["email"]) == finished.recipient]
                 conn.executemany("UPDATE recipients SET enabled=0 WHERE id=?", matches)
+                chosen = task.templates.get(finished.template_id)
+                content = chosen.content if chosen else task.content
+                files = chosen.attachments if chosen else task.attachments
+                if content is not None:
+                    save_local_sent(conn, int(task.senders[finished.sender].id), task.task_id,
+                        task.assignments.index(finished), finished.sender, finished.recipient,
+                        content.model_dump(), [file.filename for file in files], finished.finished_at, finished.message_id)
             conn.execute("INSERT INTO send_log (task_id,recipient,sender,status,message,finished_at) VALUES (?,?,?,?,?,?)",
                 (task.task_id, finished.recipient, finished.sender, finished.status, finished.message, finished.finished_at))
         conn.execute("UPDATE task_runs SET status=?,assignments=?,updated_at=? WHERE task_id=?",
@@ -625,7 +674,7 @@ def to_summary(task: RuntimeTask) -> TaskSummary:
     progress = round((done / total) * 100, 2) if total else 100.0
     return TaskSummary(
         task_id=task.task_id,
-        subject=task.content.subject,
+        subject=task.content.subject if task.content else f"随机模板（{len(task.templates)}个）",
         uncertain=sum(item.status == "uncertain" for item in task.assignments),
         resumable=sum(item.status == "pending" for item in task.assignments),
         status=task.status,
@@ -689,11 +738,13 @@ def _create_smtp_connection(host: str, port: int, timeout: int = 30) -> smtplib.
         return smtp
 
 
-def send_email(sender: SenderConfig, recipient: str, content: MailContent, attachments: list[MailAttachment]) -> None:
+def send_email(sender: SenderConfig, recipient: str, content: MailContent, attachments: list[MailAttachment]) -> str:
     message = EmailMessage()
     message["From"] = f"{sender.name} <{sender.email}>" if sender.name else str(sender.email)
     message["To"] = recipient
     message["Subject"] = content.subject
+    message["Message-ID"] = f"<{uuid4().hex}@mail-group.local>"
+    message["Date"] = formatdate(localtime=True)
     message.set_content(content.body, subtype=content.content_type, charset="utf-8")
 
     for attachment in attachments:
@@ -708,23 +759,83 @@ def send_email(sender: SenderConfig, recipient: str, content: MailContent, attac
     with _create_smtp_connection(sender.smtp_host, sender.smtp_port) as smtp:
         smtp.login(str(sender.email), sender.auth_code)
         smtp.send_message(message)
+    return str(message['Message-ID'])
+
+
+def validate_attachment_name(filename: str) -> None:
+    if not filename or filename != filename.rstrip(" .") or filename != os.path.basename(filename) or "/" in filename or "\\" in filename or any(ord(c) < 32 for c in filename) or any(c in filename for c in ':*?"<>|'):
+        raise HTTPException(400, "附件名称包含无效字符，请重命名后再试")
+    if any(filename.lower().endswith(extension) for extension in BLOCKED_ATTACHMENT_EXTENSIONS):
+        raise HTTPException(400, f"{filename} 是 QQ 邮箱不建议发送的附件类型")
 
 
 async def parse_attachments(files: list[UploadFile]) -> list[MailAttachment]:
     attachments: list[MailAttachment] = []
     for file in files:
         filename = file.filename or "attachment"
-        if filename != filename.rstrip(" .") or filename != os.path.basename(filename) or "/" in filename or "\\" in filename or any(ord(c) < 32 for c in filename) or any(c in filename for c in ':*?"<>|'):
-            raise HTTPException(400, "附件名称包含无效字符，请重命名后再试")
-        lowered = filename.lower()
-        if any(lowered.endswith(extension) for extension in BLOCKED_ATTACHMENT_EXTENSIONS):
-            raise HTTPException(status_code=400, detail=f"{filename} 是 QQ 邮箱不建议发送的附件类型")
+        validate_attachment_name(filename)
         content = await file.read(MAX_ATTACHMENT_SIZE + 1)
         if len(content) > MAX_ATTACHMENT_SIZE:
             raise HTTPException(status_code=400, detail=f"{filename} 超过 50MB 限制")
         content_type = file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
         attachments.append(MailAttachment(filename=filename, content=content, content_type=content_type))
     return attachments
+
+
+def read_stored_attachment(directory: str, name: str, content_type: str | None = None) -> MailAttachment:
+    validate_attachment_name(name)
+    path = os.path.realpath(os.path.join(directory, name))
+    if not path.startswith(os.path.realpath(directory) + os.sep):
+        raise HTTPException(409, "模板或任务附件路径无效")
+    try:
+        with open(path, "rb") as stream:
+            content = stream.read(MAX_ATTACHMENT_SIZE + 1)
+    except OSError as exc:
+        raise HTTPException(409, "模板或任务附件无法读取，请检查附件后重试") from exc
+    if len(content) > MAX_ATTACHMENT_SIZE:
+        raise HTTPException(400, "模板或任务附件超过 50MB 限制")
+    filename = name.split("_", 1)[-1]
+    return MailAttachment(filename, content, content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream")
+
+
+def resolve_templates(template_ids: list[int]) -> dict[int, RuntimeTemplate]:
+    templates = {}
+    # Hold the database lock while reading files so a concurrent template delete cannot split a snapshot.
+    with db() as conn:
+        for template_id in template_ids:
+            row = conn.execute("SELECT * FROM saved_mails WHERE id=?", (template_id,)).fetchone()
+            if row is None:
+                raise HTTPException(409, "所选邮件模板已被删除，请刷新模板列表后重试")
+            content = MailContent(subject=row["subject"], body=row["body"], content_type=row["content_type"])
+            files = [read_stored_attachment(SAVED_ATTACHMENTS_DIR, name) for name in json.loads(row["attachments"])]
+            templates[template_id] = RuntimeTemplate(template_id, content, files)
+    return templates
+
+
+def assign_template_choices(assignments: list[Assignment], templates: dict[int, RuntimeTemplate], content: MailContent | None) -> None:
+    choices = list(templates.values())
+    for assignment in assignments:
+        if choices:
+            chosen = random.choice(choices)
+            assignment.template_id = chosen.template_id
+            assignment.subject = chosen.content.subject
+        elif content is not None:
+            assignment.subject = content.subject
+
+
+def template_snapshots(templates: dict[int, RuntimeTemplate]) -> str:
+    return json.dumps([{"template_id": item.template_id, "content": item.content.model_dump(),
+        "attachments": [{"name": name, "content_type": attachment.content_type}
+                        for name, attachment in zip(item.attachment_names, item.attachments, strict=True)]}
+        for item in templates.values()])
+
+
+def restore_templates(row) -> dict[int, RuntimeTemplate]:
+    directory = os.path.join(DATA_DIR, "task_attachments", row["task_id"])
+    return {item["template_id"]: RuntimeTemplate(item["template_id"], MailContent(**item["content"]),
+        [read_stored_attachment(directory, attachment["name"], attachment["content_type"]) for attachment in item["attachments"]],
+        [attachment["name"] for attachment in item["attachments"]])
+        for item in json.loads(row["template_snapshots"])}
 
 
 async def run_task(task_id: str) -> None:
@@ -744,7 +855,13 @@ async def run_task(task_id: str) -> None:
                 assignment.status = "sending"
                 persist_task(task)  # Persist before the external side effect.
                 try:
-                    await asyncio.to_thread(send_email, task.senders[assignment.sender], assignment.recipient, task.content, task.attachments)
+                    chosen = task.templates[assignment.template_id] if assignment.template_id is not None else None
+                    content = chosen.content if chosen else task.content
+                    files = chosen.attachments if chosen else task.attachments
+                    if content is None:
+                        raise ValueError("任务邮件内容缺失")
+                    message_id = await asyncio.to_thread(send_email, task.senders[assignment.sender], assignment.recipient, content, files)
+                    assignment.message_id = message_id if isinstance(message_id, str) else ''
                     assignment.status = "success"
                     assignment.message = "发送成功"
                 except asyncio.CancelledError:
@@ -791,8 +908,12 @@ async def create_task(payload: str = Form(...), attachments: list[UploadFile] = 
         parsed = SendTaskRequest.model_validate_json(payload)
     except ValidationError as exc:
         raise HTTPException(400, validation_details(exc)) from exc
+    if parsed.template_ids and attachments:
+        raise HTTPException(400, "随机模板使用各自保存的附件，不能混入当前编辑器附件")
     files = await parse_attachments(attachments)
     digest_data = parsed.model_dump(exclude={"request_id"})
+    if not parsed.template_ids:
+        digest_data.pop("template_ids")  # Preserve idempotency for pre-3.1 manual requests.
     digest_data["attachments"] = [(f.filename, f.content_type, hashlib.sha256(f.content).hexdigest()) for f in files]
     digest = hashlib.sha256(json.dumps(digest_data, sort_keys=True).encode()).hexdigest()
     async with TASK_LOCK:
@@ -803,32 +924,39 @@ async def create_task(payload: str = Form(...), attachments: list[UploadFile] = 
                 raise HTTPException(409, "此请求编号已用于不同内容，请重新创建任务")
             return to_summary(TASKS[previous["task_id"]]) if previous["task_id"] in TASKS else summary_from_row(previous)
         senders = resolve_senders(parsed.sender_ids)
+        templates = await asyncio.to_thread(resolve_templates, parsed.template_ids)
         assignments = build_assignments(senders, parsed.recipients)
+        assign_template_choices(assignments, templates, parsed.content)
         now = datetime.now().isoformat(timespec="seconds")
         task_id = uuid4().hex
         folder = os.path.join(DATA_DIR, "task_attachments", task_id)
         names = []
+        folder_created = False
         try:
-            if files:
+            if files or any(item.attachments for item in templates.values()):
                 os.makedirs(folder, exist_ok=False)
-                for attachment in files:
-                    name = uuid4().hex + "_" + attachment.filename
-                    with open(os.path.join(folder, name), "wb") as stream:
-                        stream.write(attachment.content)
-                    names.append(name)
+                folder_created = True
+                for source, stored_names in [(files, names)] + [(item.attachments, item.attachment_names) for item in templates.values()]:
+                    for attachment in source:
+                        name = uuid4().hex + "_" + attachment.filename
+                        with open(os.path.join(folder, name), "wb") as stream:
+                            stream.write(attachment.content)
+                        stored_names.append(name)
             with db() as conn:
                 check_recipients(conn, [a.recipient for a in assignments])
-                conn.execute("INSERT INTO task_runs VALUES (?,?,?,?,?,?,?,?,?)",
+                conn.execute("""INSERT INTO task_runs
+                    (task_id,request_id,request_digest,request_json,assignments,attachment_names,status,created_at,updated_at,template_snapshots)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (task_id, parsed.request_id, digest, parsed.model_dump_json(),
-                     json.dumps([a.model_dump() for a in assignments]), json.dumps(names), "pending", now, now))
+                     json.dumps([a.model_dump() for a in assignments]), json.dumps(names), "pending", now, now, template_snapshots(templates)))
                 conn.commit()
         except BaseException:
             # folder is a new UUID subdirectory created exclusively by this request.
-            if os.path.isdir(folder):
+            if folder_created and os.path.realpath(folder).startswith(os.path.realpath(os.path.join(DATA_DIR, "task_attachments")) + os.sep):
                 shutil.rmtree(folder)
             raise
         task = RuntimeTask(task_id, parsed.content, {str(s.email): s for s in senders}, assignments,
-                           files, "pending", now, now, parsed.sender_ids, names)
+                           files, "pending", now, now, parsed.sender_ids, names, templates)
         schedule_task(task)
         return to_summary(task)
 
@@ -872,6 +1000,9 @@ async def resume_task(task_id: str, payload: ResumeRequest) -> TaskSummary:
         for item in pending:
             item.sender = str(next(cycle_senders).email)
         names = json.loads(row["attachment_names"])
+        templates = restore_templates(row)
+        if any(item.template_id is not None and item.template_id not in templates for item in pending):
+            raise HTTPException(409, "任务模板副本缺失，无法恢复")
         files = []
         for name in names:
             if os.path.basename(name) != name:
@@ -884,7 +1015,7 @@ async def resume_task(task_id: str, payload: ResumeRequest) -> TaskSummary:
         with db() as conn:
             check_recipients(conn, [a.recipient for a in pending], exclude_task=task_id)
         task = RuntimeTask(task_id, saved.content, {str(s.email): s for s in senders}, assignments,
-                           files, "pending", row["created_at"], row["updated_at"], saved.sender_ids, names)
+                           files, "pending", row["created_at"], row["updated_at"], saved.sender_ids, names, templates)
         persist_task(task)
         schedule_task(task)
         return to_summary(task)
@@ -892,7 +1023,9 @@ async def resume_task(task_id: str, payload: ResumeRequest) -> TaskSummary:
 
 @app.post("/api/assignments/preview", response_model=list[Assignment])
 def preview_assignments(payload: SendTaskRequest) -> list[Assignment]:
-    return build_assignments(resolve_senders(payload.sender_ids), payload.recipients)
+    assignments = build_assignments(resolve_senders(payload.sender_ids), payload.recipients)
+    assign_template_choices(assignments, resolve_templates(payload.template_ids), payload.content)
+    return assignments
 
 
 @app.post("/api/shutdown")
@@ -1012,12 +1145,13 @@ def delete_saved_mail(mail_id: int) -> dict[str, str]:
 def list_sender_configs() -> list[StoredSender]:
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, email, auth_code, smtp_host, smtp_port, note, enabled, created_at FROM sender_configs ORDER BY id DESC"
+            "SELECT * FROM sender_configs ORDER BY id DESC"
         ).fetchall()
         return [
             StoredSender(
                 id=row["id"], email=row["email"], auth_code=row["auth_code"],
                 smtp_host=row["smtp_host"], smtp_port=row["smtp_port"],
+                imap_host=row["imap_host"], imap_port=row["imap_port"], imap_security=row["imap_security"], imap_sent_folder=row["imap_sent_folder"],
                 note=row["note"], enabled=bool(row["enabled"]), created_at=row["created_at"],
             )
             for row in rows
@@ -1029,13 +1163,15 @@ def create_sender_config(payload: StoredSenderCreate) -> StoredSender:
     now = datetime.now().isoformat(timespec="seconds")
     with db() as conn:
         cursor = conn.execute(
-            "INSERT INTO sender_configs (email, auth_code, smtp_host, smtp_port, note, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (payload.email, payload.auth_code, payload.smtp_host, payload.smtp_port, payload.note, now),
+            "INSERT INTO sender_configs (email, auth_code, smtp_host, smtp_port, note, created_at, imap_host, imap_port, imap_security, imap_sent_folder) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (payload.email, payload.auth_code, payload.smtp_host, payload.smtp_port, payload.note, now,
+                payload.imap_host, payload.imap_port, payload.imap_security, payload.imap_sent_folder),
         )
         conn.commit()
         return StoredSender(
             id=cursor.lastrowid, email=payload.email, auth_code=payload.auth_code,
             smtp_host=payload.smtp_host, smtp_port=payload.smtp_port,
+            imap_host=payload.imap_host, imap_port=payload.imap_port, imap_security=payload.imap_security, imap_sent_folder=payload.imap_sent_folder,
             note=payload.note, enabled=True, created_at=now,
         )
 
@@ -1043,17 +1179,27 @@ def create_sender_config(payload: StoredSenderCreate) -> StoredSender:
 @app.put("/api/sender-configs/{sender_id}", response_model=StoredSender)
 def update_sender_config(sender_id: int, payload: StoredSenderUpdate) -> StoredSender:
     with db() as conn:
-        row = conn.execute("SELECT id, enabled, created_at, auth_code FROM sender_configs WHERE id = ?", (sender_id,)).fetchone()
+        row = conn.execute("SELECT * FROM sender_configs WHERE id = ?", (sender_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="发送邮箱不存在")
+        # Older clients may omit IMAP settings. Preserve those fields on SMTP-only updates.
+        settings = {key: getattr(payload, key) if key in payload.model_fields_set else row[key]
+            for key in ('imap_host', 'imap_port', 'imap_security', 'imap_sent_folder')}
+        account_changed = any(row[key] != value for key, value in {
+            'email': str(payload.email), 'auth_code': payload.auth_code or row['auth_code'],
+            'smtp_host': payload.smtp_host, **settings}.items())
+        if account_changed:
+            clear_account(conn, sender_id, keep_local=row['email'].lower() == str(payload.email).lower())
         conn.execute(
-            "UPDATE sender_configs SET email=?, auth_code=?, smtp_host=?, smtp_port=?, note=? WHERE id=?",
-            (payload.email, payload.auth_code or row["auth_code"], payload.smtp_host, payload.smtp_port, payload.note, sender_id),
+            "UPDATE sender_configs SET email=?, auth_code=?, smtp_host=?, smtp_port=?, note=?, imap_host=?, imap_port=?, imap_security=?, imap_sent_folder=?, mailbox_revision=mailbox_revision+? WHERE id=?",
+            (payload.email, payload.auth_code or row["auth_code"], payload.smtp_host, payload.smtp_port, payload.note,
+                settings['imap_host'], settings['imap_port'], settings['imap_security'], settings['imap_sent_folder'], int(account_changed), sender_id),
         )
         conn.commit()
         return StoredSender(
             id=sender_id, email=payload.email, auth_code=payload.auth_code,
             smtp_host=payload.smtp_host, smtp_port=payload.smtp_port,
+            **settings,
             note=payload.note, enabled=bool(row["enabled"]), created_at=row["created_at"],
         )
 
@@ -1061,6 +1207,7 @@ def update_sender_config(sender_id: int, payload: StoredSenderUpdate) -> StoredS
 @app.delete("/api/sender-configs/{sender_id}")
 def delete_sender_config(sender_id: int) -> dict[str, str]:
     with db() as conn:
+        clear_account(conn, sender_id)
         cursor = conn.execute("DELETE FROM sender_configs WHERE id = ?", (sender_id,))
         conn.commit()
         if cursor.rowcount == 0:

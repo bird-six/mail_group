@@ -1,4 +1,4 @@
-param([string]$Artifact = 'MailGroup-3.0.0-x64-portable.exe')
+param([string]$Artifact = 'MailGroup-3.2.0-x64-portable.exe')
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path -Parent $PSScriptRoot
 $executable = Join-Path $workspace "release/desktop-v3/$Artifact"

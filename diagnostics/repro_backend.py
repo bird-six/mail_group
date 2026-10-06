@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import smtplib
+import imaplib
 import sys
 import tempfile
 import types
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
+    sys.path.insert(0, str(ROOT / 'backend'))
     source = (ROOT / "backend/main.py").read_text(encoding="utf-8")
     # The only initialization change: never open the user's production database.
     source = source.replace("\ninit_db()\n", "\n# initialized in temporary directory\n")
@@ -27,6 +29,9 @@ def main() -> None:
     smtplib.SMTP = smtp_guard
     smtplib.SMTP_SSL = smtp_guard
     module.send_email = smtp_guard
+    imap_guard = Mock(side_effect=AssertionError('Real IMAP is forbidden in this reproduction'))
+    imaplib.IMAP4 = imap_guard
+    imaplib.IMAP4_SSL = imap_guard
     module.run_task = AsyncMock()  # Task creation is tested; the actual worker is never run.
 
     with tempfile.TemporaryDirectory(prefix="mail-bulk-repro-") as tmp:
@@ -43,7 +48,7 @@ def main() -> None:
                 if command.get("op") == "reset":
                     with module.db() as conn:
                         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                        for table in ("recipients", "sender_configs", "saved_mails", "task_history", "send_log", "task_runs"):
+                        for table in ("recipients", "sender_configs", "saved_mails", "task_history", "send_log", "task_runs", "mailbox_messages", "mailbox_folders", "mailbox_sync_state"):
                             if table not in tables:
                                 continue
                             conn.execute(f"DELETE FROM {table}")
@@ -74,6 +79,7 @@ def main() -> None:
                     result.update(status=response.status_code, text=response.text)
                 result.update(smtp_calls=smtp_guard.call_count, scheduled_tasks=module.run_task.call_count)
                 assert smtp_guard.call_count == 0
+                assert imap_guard.call_count == 0
                 print(json.dumps(result, ensure_ascii=True), flush=True)
         if module._shared_conn is not None:
             module._shared_conn.close()

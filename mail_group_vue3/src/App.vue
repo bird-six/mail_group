@@ -2,11 +2,12 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { apiFetch, request, requestForm } from './api'
 import DesktopTitleBar from './DesktopTitleBar.vue'
+import UnifiedMailbox from './UnifiedMailbox.vue'
 import { normalizeCopiedEmail, parseRecipients } from './recipients'
 
 type SendStatus = 'pending' | 'sending' | 'success' | 'failed' | 'uncertain'
 type TaskStatus = 'pending' | 'running' | 'completed' | 'interrupted'
-type SectionKey = 'home' | 'mail-content' | 'target-mails' | 'sender-cluster' | 'data-panel' | 'help'
+type SectionKey = 'home' | 'mail-content' | 'target-mails' | 'sender-cluster' | 'mailbox' | 'data-panel' | 'help'
 
 interface SenderConfig {
   id: string
@@ -26,6 +27,8 @@ interface RecipientItem {
 interface Assignment {
   recipient: string
   sender: string
+  template_id?: number | null
+  subject?: string
   status: SendStatus
   message: string
   finished_at?: string | null
@@ -62,6 +65,10 @@ interface StoredSender {
   has_auth_code: boolean
   smtp_host: string
   smtp_port: number
+  imap_host?: string
+  imap_port?: number
+  imap_security?: 'ssl' | 'starttls'
+  imap_sent_folder?: string
   note: string
   enabled: boolean
   created_at: string
@@ -226,9 +233,15 @@ const showTaskDetail = ref(false)
 const selectedTask = computed(() => tasks.value.find(task => task.task_id === currentTaskId.value))
 const savedMails = ref<SavedMail[]>([])
 const selectedSavedMailId = ref<number | null>(null)
+const selectedTemplateIds = ref<number[]>([])
+const sendMode = ref<'current' | 'random'>('current')
+const sendSourceText = computed(() => sendMode.value === 'random'
+  ? `随机模板：已选 ${selectedTemplateIds.value.length} 个，每位收件人独立抽取，附件随模板发送`
+  : `当前编辑内容：${content.subject.trim() || '尚未填写主题'}`)
 const loading = ref(false)
 const errorMessage = ref('')
 const activeSection = ref<SectionKey>('home')
+const mailboxOpened = ref(false)
 const showSenderModal = ref(false)
 const editingSenderId = ref<number | null>(null)
 const showDetailModal = ref(false)
@@ -248,6 +261,10 @@ const senderForm = reactive({
   auth_code: '',
   smtp_host: 'smtp.qq.com',
   smtp_port: 465,
+  imap_host: '',
+  imap_port: 993,
+  imap_security: 'ssl' as 'ssl' | 'starttls',
+  imap_sent_folder: '',
   note: '',
 })
 const selectedPreset = ref('')
@@ -265,6 +282,10 @@ function applyPreset() {
   if (preset) {
     senderForm.smtp_host = preset.host
     senderForm.smtp_port = preset.port
+    senderForm.imap_host = ''
+    senderForm.imap_port = 993
+    senderForm.imap_security = 'ssl'
+    senderForm.imap_sent_folder = ''
   }
 }
 const statsData = ref<StatsResponse | null>(null)
@@ -386,7 +407,9 @@ const trendArrow = computed(() => {
   const diff = statsData.value.period_rate - statsData.value.rate_prev
   return { up: diff >= 0, value: Math.abs(diff).toFixed(1) }
 })
-const canSend = computed(() => Boolean(content.subject.trim() && content.body.trim() && enabledSenders.value.length && enabledRecipients.value.length && !parsingRecipients.value && !recipientInputDirty.value && !templateLoading.value && !templateError.value && !loading.value))
+const canSend = computed(() => Boolean(
+  (sendMode.value === 'random' ? selectedTemplateIds.value.length > 0 : content.subject.trim() && content.body.trim() && !templateLoading.value && !templateError.value)
+  && enabledSenders.value.length && enabledRecipients.value.length && !parsingRecipients.value && !recipientInputDirty.value && !loading.value))
 
 function openAddSenderModal() {
   editingSenderId.value = null
@@ -394,6 +417,10 @@ function openAddSenderModal() {
   senderForm.auth_code = ''
   senderForm.smtp_host = 'smtp.qq.com'
   senderForm.smtp_port = 465
+  senderForm.imap_host = ''
+  senderForm.imap_port = 993
+  senderForm.imap_security = 'ssl'
+  senderForm.imap_sent_folder = ''
   senderForm.note = ''
   selectedPreset.value = ''
   showSenderModal.value = true
@@ -405,6 +432,10 @@ function openEditSenderModal(sender: StoredSender) {
   senderForm.auth_code = ''
   senderForm.smtp_host = sender.smtp_host
   senderForm.smtp_port = sender.smtp_port
+  senderForm.imap_host = sender.imap_host || ''
+  senderForm.imap_port = sender.imap_port || 993
+  senderForm.imap_security = sender.imap_security || 'ssl'
+  senderForm.imap_sent_folder = sender.imap_sent_folder || ''
   senderForm.note = sender.note
   selectedPreset.value = ''
   showSenderModal.value = true
@@ -429,6 +460,11 @@ async function submitSenderForm() {
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '保存发送邮箱失败'
   }
+}
+
+function configureMailbox(id: number) {
+  const sender = savedSenders.value.find(item => item.id === id)
+  if (sender) openEditSenderModal(sender)
 }
 
 async function removeSender(id: string) {
@@ -618,17 +654,17 @@ function buildPayloadFormData() {
   formData.append(
     'payload',
     JSON.stringify({
-      content: {
+      ...(sendMode.value === 'random' ? { template_ids: [...selectedTemplateIds.value].sort((a, b) => a - b) } : { content: {
         subject: content.subject,
         body: content.body,
         content_type: content.content_type,
-      },
+      } }),
       sender_ids: enabledSenders.value.map(sender => Number(sender.id)),
       request_id: submission?.id,
       recipients: enabledRecipients.value,
     }),
   )
-  attachments.value.forEach((file) => {
+  if (sendMode.value === 'current') attachments.value.forEach((file) => {
     formData.append('attachments', file)
   })
   return formData
@@ -656,7 +692,7 @@ function validateAttachment(file: File) {
 }
 
 function appendAttachments(fileList: FileList | File[]) {
-  if (templateLoading.value) return
+  if (templateLoading.value || sendMode.value === 'random') return
   attachmentError.value = ''
   const nextFiles = [...attachments.value]
   Array.from(fileList).forEach((file) => {
@@ -707,6 +743,7 @@ async function loadSenders() {
 async function loadSavedMails() {
   try {
     savedMails.value = await request<SavedMail[]>('/api/saved-mails')
+    selectedTemplateIds.value = selectedTemplateIds.value.filter(id => savedMails.value.some(mail => mail.id === id))
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '获取保存的邮件失败'
   }
@@ -1071,7 +1108,20 @@ const gridItems = computed(() => {
   return fillGridData(grid, statsData.value.stats)
 })
 
+function toggleTemplate(id: number) {
+  if (loading.value) return
+  sendMode.value = 'random'
+  selectedTemplateIds.value = selectedTemplateIds.value.includes(id)
+    ? selectedTemplateIds.value.filter(selected => selected !== id) : [...selectedTemplateIds.value, id]
+}
+
+function selectAllTemplates() {
+  sendMode.value = 'random'
+  selectedTemplateIds.value = savedMails.value.map(mail => mail.id)
+}
+
 async function selectSavedMail(mail: SavedMail) {
+  sendMode.value = 'current'
   const version = ++templateVersion
   templateAbort?.abort()
   templateAbort = new AbortController()
@@ -1131,6 +1181,7 @@ async function confirmDeleteSavedMail(id: number) {
   try {
     await request(`/api/saved-mails/${id}`, { method: 'DELETE' })
     savedMails.value = savedMails.value.filter((mail) => mail.id !== id)
+    selectedTemplateIds.value = selectedTemplateIds.value.filter(selected => selected !== id)
     if (selectedSavedMailId.value === id) {
       selectedSavedMailId.value = null
     }
@@ -1141,8 +1192,9 @@ async function confirmDeleteSavedMail(id: number) {
 
 async function submitTask() {
   if (!canSend.value) return
-  const signature = JSON.stringify([content, enabledSenders.value.map(s => s.id), enabledRecipients.value,
-    attachments.value.map(f => [f.name, f.size, f.lastModified])])
+  const source = sendMode.value === 'random' ? [...selectedTemplateIds.value].sort((a, b) => a - b)
+    : [content, attachments.value.map(f => [f.name, f.size, f.lastModified])]
+  const signature = JSON.stringify([sendMode.value, source, enabledSenders.value.map(s => s.id), enabledRecipients.value])
   if (!submission || submission.signature !== signature) submission = { signature, id: crypto.randomUUID() }
   loading.value = true
   errorMessage.value = ''
@@ -1173,6 +1225,7 @@ function statusText(status: TaskStatus | SendStatus) {
 }
 
 function switchSection(sectionId: SectionKey) {
+  if (sectionId === 'mailbox') mailboxOpened.value = true
   activeSection.value = sectionId
   if (showSenderModal.value) showSenderModal.value = false
 }
@@ -1233,6 +1286,7 @@ onUnmounted(() => {
         <button :class="{ active: activeSection === 'data-panel' }" type="button" @click="switchSection('data-panel')">
           数据面板
         </button>
+        <button :class="{ active: activeSection === 'mailbox' }" type="button" @click="switchSection('mailbox')">邮件汇总</button>
         <button :class="{ active: activeSection === 'help' }" type="button" @click="switchSection('help')">
           使用说明
         </button>
@@ -1240,7 +1294,7 @@ onUnmounted(() => {
     </aside>
 
     <main class="workspace">
-      <header class="topbar">
+      <header v-if="activeSection !== 'mailbox'" class="topbar">
         <div>
           <h1>邮件自动发送系统</h1>
           <p>多 QQ 邮箱并行发送，收件人去重后按发送邮箱均衡分配。</p>
@@ -1248,6 +1302,7 @@ onUnmounted(() => {
       </header>
 
       <p v-if="errorMessage" class="notice">{{ errorMessage }}</p>
+      <UnifiedMailbox v-if="mailboxOpened" v-show="activeSection === 'mailbox'" :key="savedSenders.map(s => JSON.stringify(s)).join()" @configure="configureMailbox" />
       <p v-if="recipientInputDirty && activeSection === 'home'" class="notice">
         收件人输入已修改，请先到“目标邮箱”完成解析，再开始群发。
       </p>
@@ -1281,6 +1336,7 @@ onUnmounted(() => {
               </button>
             </div>
           </div>
+          <p class="send-source-summary">{{ sendSourceText }} <button class="text-button" @click="activeSection = 'mail-content'">设置邮件</button></p>
           <div class="table-wrap task-table">
             <table>
               <thead>
@@ -1330,21 +1386,28 @@ onUnmounted(() => {
           <span>01</span>
           <div>
             <h2>邮件内容</h2>
-            <p>设置本次群发的主题、正文和附件。可保存常用邮件模板以便复用。</p>
+            <p>发送当前编辑的邮件，或多选模板，为每位收件人随机选择一封邮件。</p>
           </div>
         </div>
-        <div class="mail-content-layout">
+        <div class="send-mode" role="group" aria-label="发送方式">
+          <label><input v-model="sendMode" type="radio" value="current" name="send-mode" />当前编辑内容</label>
+          <label><input v-model="sendMode" type="radio" value="random" name="send-mode" />随机使用选中模板</label>
+          <span v-if="sendMode === 'random'" role="status">已选 {{ selectedTemplateIds.length }} 个 · 每封独立抽取，可能重复选中同一模板</span>
+        </div>
+        <div class="mail-content-layout" :class="{ 'random-mode': sendMode === 'random' }">
           <div class="panel">
             <div class="panel-title inline">
               <div>
                 <h2>内容编辑</h2>
               </div>
               <div class="editor-actions">
-                <button class="primary add-sender-btn" :disabled="!content.subject.trim() || !content.body.trim() || templateLoading || Boolean(templateError)" @click="saveCurrentMail">
+                <button class="primary add-sender-btn" :disabled="sendMode === 'random' || !content.subject.trim() || !content.body.trim() || templateLoading || Boolean(templateError)" @click="saveCurrentMail">
                   保存
                 </button>
               </div>
             </div>
+            <p v-if="sendMode === 'random'" class="field-hint">正在使用已选模板。选择“当前编辑内容”或点击模板的“载入编辑”，即可编辑并保存邮件。</p>
+            <fieldset class="mail-editor-fields" :disabled="sendMode === 'random'">
             <label>邮件主题</label>
             <input v-model="content.subject" placeholder="请输入邮件主题" />
             <label>正文格式</label>
@@ -1374,34 +1437,44 @@ onUnmounted(() => {
                 <button class="text-button danger-text" @click="removeAttachment(index)">移除</button>
               </div>
             </div>
+            </fieldset>
           </div>
 
           <div class="panel">
             <div class="panel-title">
               <h2>选择邮件模板</h2>
-              <span>共 {{ savedMails.length }} 个模板，点击选择使用</span>
+              <span>共 {{ savedMails.length }} 个模板，已选 {{ selectedTemplateIds.length }} 个</span>
+              <p class="field-hint">勾选多个模板随机发送，各自的主题、正文与附件保持配套。</p>
+              <div class="template-selection-actions">
+                <button class="text-button" :disabled="loading || !savedMails.length" @click="selectAllTemplates">全选</button>
+                <button class="text-button" :disabled="loading || !selectedTemplateIds.length" @click="selectedTemplateIds = []">清空选择</button>
+                <button class="text-button" :disabled="loading" @click="loadSavedMails">刷新列表</button>
+              </div>
             </div>
             <div class="saved-mail-list">
               <div
                 v-for="mail in savedMails"
                 :key="mail.id"
                 class="saved-mail-item"
-                :class="{ active: selectedSavedMailId === mail.id }"
-                @click="selectSavedMail(mail)"
+                :class="{ active: selectedTemplateIds.includes(mail.id) }"
+                @click="toggleTemplate(mail.id)"
               >
                 <input
-                  type="radio"
-                  :checked="selectedSavedMailId === mail.id"
-                  class="saved-mail-radio"
-                  name="saved-mail-select"
+                  type="checkbox"
+                  :checked="selectedTemplateIds.includes(mail.id)"
+                  :disabled="loading"
+                  :aria-label="`随机发送：${mail.subject}`"
+                  class="saved-mail-checkbox"
                   @click.stop
-                  @change="selectSavedMail(mail)"
+                  @change="toggleTemplate(mail.id)"
                 />
                 <div class="saved-mail-info">
                   <strong>{{ mail.subject || '(无主题)' }}</strong>
                   <span>{{ formatDate(mail.created_at) }}</span>
+                  <span>{{ mail.content_type === 'html' ? 'HTML' : '纯文本' }} · {{ mail.attachments.length }} 个附件</span>
                 </div>
                 <div class="saved-mail-actions">
+                  <button class="text-button edit-template" @click.stop="selectSavedMail(mail)">载入编辑</button>
                   <button
                     class="icon-button detail-btn"
                     title="查看详情"
@@ -1422,7 +1495,7 @@ onUnmounted(() => {
                   </button>
                 </div>
               </div>
-              <p v-if="!savedMails.length" class="empty-row">暂无保存的邮件模板，编辑内容后点击"保存"按钮。</p>
+              <p v-if="!savedMails.length" class="empty-row">暂无保存的邮件模板，选择“当前编辑内容”，填写邮件后点击“保存”。</p>
             </div>
           </div>
         </div>
@@ -2120,7 +2193,7 @@ onUnmounted(() => {
 
       <Teleport to="body">
         <div v-if="showSenderModal" class="modal-overlay" @click.self="showSenderModal = false">
-          <div class="modal-panel">
+          <div class="modal-panel sender-modal">
             <div class="modal-head">
               <h2>{{ editingSenderId ? '编辑发送邮箱' : '添加发送邮箱' }}</h2>
               <button class="modal-close" @click="showSenderModal = false">&times;</button>
@@ -2145,6 +2218,19 @@ onUnmounted(() => {
               <input v-model="senderForm.smtp_host" />
               <label>端口</label>
               <input v-model.number="senderForm.smtp_port" type="number" />
+              <details class="imap-settings" :open="activeSection === 'mailbox'">
+                <summary>收发邮件汇总 · IMAP 设置</summary>
+                <p>与 SMTP 共用授权码。请先在邮箱设置中开启 IMAP；留空时根据常见 SMTP 服务器自动识别。</p>
+                <label for="imap-host">IMAP 地址</label>
+                <input id="imap-host" v-model="senderForm.imap_host" placeholder="自动识别，或填写 imap.example.com" />
+                <label for="imap-port">IMAP 端口</label>
+                <input id="imap-port" v-model.number="senderForm.imap_port" type="number" min="1" max="65535" />
+                <label for="imap-security">加密方式</label>
+                <select id="imap-security" v-model="senderForm.imap_security"><option value="ssl">SSL / TLS（常用端口 993）</option><option value="starttls">STARTTLS（常用端口 143）</option></select>
+                <label for="imap-sent">已发送文件夹</label>
+                <input id="imap-sent" v-model="senderForm.imap_sent_folder" placeholder="自动识别；失败时填写原邮箱中的文件夹名称" />
+                <p>修改 IMAP 设置后请重新同步；更换邮箱地址会移除该账号的汇总缓存。</p>
+              </details>
               <label>备注</label>
               <input v-model="senderForm.note" placeholder="可选，用于识别该邮箱" />
             </div>
@@ -2240,9 +2326,9 @@ onUnmounted(() => {
             <div class="modal-body">
               <p>{{ statusText(selectedTask.status) }} · 成功 {{ selectedTask.success }} · 失败 {{ selectedTask.failed }} · 待处理 {{ selectedTask.pending }}</p>
               <p v-if="selectedTask.uncertain" class="field-error">{{ selectedTask.uncertain }} 封邮件的送达状态尚未确认，请先在发件箱核对，避免重复发送。</p>
-              <div class="table-wrap"><table><thead><tr><th>收件人</th><th>发件人</th><th>结果</th><th>说明</th></tr></thead>
-                <tbody><tr v-for="item in selectedTask.assignments" :key="item.recipient"><td>{{ item.recipient }}</td><td>{{ item.sender }}</td><td>{{ statusText(item.status) }}</td><td>{{ item.message || '-' }}</td></tr>
-                <tr v-if="!selectedTask.assignments.length"><td colspan="4">此旧版任务没有可用的发送明细。</td></tr></tbody></table></div>
+              <div class="table-wrap"><table><thead><tr><th>收件人</th><th>发件人</th><th>邮件主题</th><th>结果</th><th>说明</th></tr></thead>
+                <tbody><tr v-for="item in selectedTask.assignments" :key="item.recipient"><td>{{ item.recipient }}</td><td>{{ item.sender }}</td><td>{{ item.subject || selectedTask.subject || '-' }}</td><td>{{ statusText(item.status) }}</td><td>{{ item.message || '-' }}</td></tr>
+                <tr v-if="!selectedTask.assignments.length"><td colspan="5">此旧版任务没有可用的发送明细。</td></tr></tbody></table></div>
             </div>
             <div class="modal-foot"><button class="primary" @click="showTaskDetail = false">关闭</button></div>
           </div>
@@ -2253,9 +2339,19 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.imap-settings { margin: 16px 0; padding: 12px; border: 1px solid #e1e7ef; border-radius: 8px; }
+.imap-settings summary { cursor: pointer; font-size: 13px; color: #415773; }
+.imap-settings p { font-size: 12px; line-height: 1.7; color: #78869a; }
+.imap-settings input, .imap-settings select { width: 100%; box-sizing: border-box; }
+.sender-modal { max-height: calc(100vh - 70px); display: flex; flex-direction: column; }
+.sender-modal .modal-body { overflow-y: auto; min-height: 0; }
+.sender-modal .modal-head, .sender-modal .modal-foot { flex-shrink: 0; }
 :global(*) {
   box-sizing: border-box;
 }
+
+:global(html), :global(body), .workspace { scrollbar-width: none; }
+:global(html::-webkit-scrollbar), :global(body::-webkit-scrollbar), .workspace::-webkit-scrollbar { display: none; }
 
 :global(body) {
   margin: 0;
@@ -3059,7 +3155,7 @@ th {
 .saved-mail-actions {
   display: flex;
   gap: 8px;
-  opacity: 0;
+  opacity: 1;
   transition: opacity 0.15s;
 }
 
@@ -3099,7 +3195,7 @@ th {
   color: #1d4ed8;
 }
 
-.saved-mail-radio {
+.saved-mail-checkbox {
   width: 16px;
   height: 16px;
   margin: 0;
@@ -4313,5 +4409,21 @@ th:has(.help-icon-wrap) {
   color: #64748b;
   margin: 0 0 4px 0;
   font-weight: 500;
+}
+
+.send-mode { display: flex; align-items: center; flex-wrap: wrap; gap: 18px; margin-bottom: 18px; padding: 16px 20px; border: 1px solid #dce5f0; border-radius: 12px; background: #fff; }
+.send-mode label { display: flex; align-items: center; gap: 8px; margin: 0; cursor: pointer; font-size: 14px; }
+.send-mode input { width: 16px; height: 16px; margin: 0; accent-color: #2563eb; }
+.send-mode span { color: #60758f; font-size: 12px; }
+.mail-editor-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.mail-editor-fields:disabled { opacity: .55; }
+.template-selection-actions { display: flex; gap: 18px; margin-top: 12px; }
+.send-source-summary { margin: 0 0 16px; padding: 10px 14px; border-radius: 8px; background: #f2f6fc; color: #4b6583; font-size: 13px; }
+.send-source-summary button { margin-left: 12px; }
+.edit-template { white-space: nowrap; }
+.saved-mail-info { min-width: 0; }
+.saved-mail-info strong { overflow-wrap: anywhere; }
+@media (max-width: 1180px) {
+  .mail-content-layout.random-mode > .panel:last-child { order: -1; }
 }
 </style>

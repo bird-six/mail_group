@@ -2,6 +2,7 @@
 import asyncio
 from pathlib import Path
 import smtplib
+import imaplib
 import sys
 from unittest.mock import Mock
 
@@ -27,12 +28,16 @@ def isolated_backend(monkeypatch, tmp_path):
     guard = Mock(side_effect=AssertionError('Tests may not connect to real SMTP'))
     monkeypatch.setattr(smtplib, 'SMTP', guard)
     monkeypatch.setattr(smtplib, 'SMTP_SSL', guard)
+    imap_guard = Mock(side_effect=AssertionError('Tests may not connect to real IMAP'))
+    monkeypatch.setattr(imaplib, 'IMAP4', imap_guard)
+    monkeypatch.setattr(imaplib, 'IMAP4_SSL', imap_guard)
     main.init_db()
     yield
     if main._shared_conn is not None:
         main._shared_conn.close()
         main._shared_conn = None
     assert guard.call_count == 0
+    assert imap_guard.call_count == 0
 
 
 @pytest.fixture

@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-set "APP_EXE=%~dp0desktop-v3\MailGroup-3.0.0-x64-portable.exe"
+set "APP_EXE=%~dp0desktop-v3\MailGroup-3.2.0-x64-portable.exe"
 if exist "%APP_EXE%" (
     start "" "%APP_EXE%"
     exit /b 0
