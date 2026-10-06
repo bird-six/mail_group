@@ -1,16 +1,48 @@
-# Runtime mail data contains SMTP authorization codes and recipient details.
-**/backend/data/
-*.sqlite3
-*.sqlite3-wal
-*.sqlite3-shm
-*.sqlite3-journal
-
-# Local credentials; commit only sanitized example configuration.
+# Private local data and secrets (never commit runtime databases).
+**/data/
+*.sqlite*
+*.db
+*.db-*
+*.pem
+*.key
+*.p12
+*.pfx
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!mail_group_vue3/.env.production
 
-# Local Python environments and compiled caches.
+# Developer environments, editor state, caches, and generated builds.
 .venv/
+node_modules/
+.idea/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+*.log
+*.tsbuildinfo
+build/
+*.zip
+*.7z
+
+# Publish release sources, never local installed copies or runtime bundles.
+release/*
+!release/build_desktop.py
+!release/build_release.py
+!release/requirements-build.txt
+!release/mail.ico
+!release/mail.svg
+!release/启动系统.bat
+!release/桌面版使用说明.txt
+
+# Keep only diagnostics that use synthetic fixtures.
+diagnostics/*
+!diagnostics/repro_backend.py
+!diagnostics/run_audit_integration.py
+!diagnostics/desktop_binary_smoke.ps1
+backend/_verify.py
+backend/test.py
+backend/*.spec
+!backend/desktop-service.spec
+mail_group_vue3/repro.config.ts
+mail_group_vue3/src/__tests__/*.repro.ts

@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { apiFetch, request, requestForm } from './api'
+import DesktopTitleBar from './DesktopTitleBar.vue'
+import { normalizeCopiedEmail, parseRecipients } from './recipients'
 
-type SendStatus = 'pending' | 'sending' | 'success' | 'failed'
-type TaskStatus = 'pending' | 'running' | 'completed'
+type SendStatus = 'pending' | 'sending' | 'success' | 'failed' | 'uncertain'
+type TaskStatus = 'pending' | 'running' | 'completed' | 'interrupted'
 type SectionKey = 'home' | 'mail-content' | 'target-mails' | 'sender-cluster' | 'data-panel' | 'help'
 
 interface SenderConfig {
   id: string
   name: string
   email: string
-  auth_code: string
+  has_auth_code: boolean
   smtp_host: string
   smtp_port: number
   enabled: boolean
@@ -30,6 +33,9 @@ interface Assignment {
 
 interface TaskSummary {
   task_id: string
+  subject: string
+  uncertain: number
+  resumable: number
   status: TaskStatus
   total: number
   success: number
@@ -42,6 +48,7 @@ interface TaskSummary {
 }
 
 interface SavedMail {
+  content_type: 'plain' | 'html'
   id: number
   subject: string
   body: string
@@ -52,7 +59,7 @@ interface SavedMail {
 interface StoredSender {
   id: number
   email: string
-  auth_code: string
+  has_auth_code: boolean
   smtp_host: string
   smtp_port: number
   note: string
@@ -84,6 +91,9 @@ interface StatsResponse {
   success_prev: number
   failed_prev: number
   rate_prev: number
+  period_rate: number
+  period_success: number
+  period_failed: number
 }
 
 interface SenderBreakdown {
@@ -162,9 +172,16 @@ function translateErrorMessage(msg: string | null | undefined): string {
 
 type StatsPeriod = 'hour' | 'day' | 'week' | 'month'
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
+const isDesktop = Boolean(window.desktop)
+const templateLoading = ref(false)
+const templateError = ref('')
+let templateVersion = 0
+let templateAbort: AbortController | undefined
+let submission: { signature: string; id: string } | null = null
+let polling = false
 
 const content = reactive({
+  content_type: 'plain' as 'plain' | 'html',
   subject: '',
   body: '',
 })
@@ -185,6 +202,9 @@ const storedRecipients = ref<StoredRecipient[]>([])
 const recipientsText = ref('')
 const recipientSearch = ref('')
 const recipientError = ref('')
+const recipientImportMessage = ref('')
+const parsingRecipients = ref(false)
+const recipientInputDirty = ref(false)
 const recipientPage = ref(1)
 const recipientPageSize = 8
 const taskSearch = ref('')
@@ -202,6 +222,8 @@ function isPendingExpanded(taskId: string): boolean {
 
 const tasks = ref<TaskSummary[]>([])
 const currentTaskId = ref('')
+const showTaskDetail = ref(false)
+const selectedTask = computed(() => tasks.value.find(task => task.task_id === currentTaskId.value))
 const savedMails = ref<SavedMail[]>([])
 const selectedSavedMailId = ref<number | null>(null)
 const loading = ref(false)
@@ -228,6 +250,23 @@ const senderForm = reactive({
   smtp_port: 465,
   note: '',
 })
+const selectedPreset = ref('')
+const emailPresets = [
+  { type: 'qq', label: 'QQ 邮箱', host: 'smtp.qq.com', port: 465 },
+  { type: '126', label: '126 邮箱', host: 'smtp.126.com', port: 465 },
+  { type: '163', label: '163 邮箱', host: 'smtp.163.com', port: 465 },
+  { type: 'gmail', label: 'Gmail', host: 'smtp.gmail.com', port: 587 },
+  { type: 'outlook', label: 'Outlook', host: 'smtp-mail.outlook.com', port: 587 },
+  { type: 'other', label: '其它邮箱', host: '', port: 465 },
+]
+
+function applyPreset() {
+  const preset = emailPresets.find((p) => p.type === selectedPreset.value)
+  if (preset) {
+    senderForm.smtp_host = preset.host
+    senderForm.smtp_port = preset.port
+  }
+}
 const statsData = ref<StatsResponse | null>(null)
 const statsPeriod = ref<StatsPeriod>('hour')
 const senderBreakdown = ref<SenderBreakdown[]>([])
@@ -278,7 +317,7 @@ const senders = computed<SenderConfig[]>(() =>
     id: String(s.id),
     name: s.note,
     email: s.email,
-    auth_code: s.auth_code,
+    has_auth_code: s.has_auth_code,
     smtp_host: s.smtp_host,
     smtp_port: s.smtp_port,
     enabled: s.enabled,
@@ -334,20 +373,20 @@ const previewAssignments = computed(() => {
 const dashboard = computed(() => {
   const totalTasks = tasks.value.length
   const totalMails = tasks.value.reduce((sum, task) => sum + task.total, 0)
-  const running = tasks.value.filter((task) => task.status !== 'completed').length
+  const running = tasks.value.filter((task) => ['pending', 'running'].includes(task.status)).length
   return { totalTasks, totalMails, running }
 })
-const runningTasks = computed(() => tasks.value.filter((task) => task.status !== 'completed'))
-const totalSuccess = computed(() => statsData.value?.total_success ?? 0)
-const totalFailed = computed(() => statsData.value?.total_failed ?? 0)
+const runningTasks = computed(() => tasks.value.filter((task) => ['pending', 'running'].includes(task.status)))
+const totalSuccess = computed(() => statsData.value?.period_success ?? 0)
+const totalFailed = computed(() => statsData.value?.period_failed ?? 0)
 const totalAll = computed(() => totalSuccess.value + totalFailed.value)
-const overallRate = computed(() => statsData.value?.success_rate ?? 0)
+const overallRate = computed(() => statsData.value?.period_rate ?? 0)
 const trendArrow = computed(() => {
   if (!statsData.value || statsData.value.total_prev === 0) return null
-  const diff = statsData.value.success_rate - statsData.value.rate_prev
+  const diff = statsData.value.period_rate - statsData.value.rate_prev
   return { up: diff >= 0, value: Math.abs(diff).toFixed(1) }
 })
-const canSend = computed(() => Boolean(content.subject.trim() && content.body.trim() && enabledSenders.value.length && enabledRecipients.value.length))
+const canSend = computed(() => Boolean(content.subject.trim() && content.body.trim() && enabledSenders.value.length && enabledRecipients.value.length && !parsingRecipients.value && !recipientInputDirty.value && !templateLoading.value && !templateError.value && !loading.value))
 
 function openAddSenderModal() {
   editingSenderId.value = null
@@ -356,21 +395,23 @@ function openAddSenderModal() {
   senderForm.smtp_host = 'smtp.qq.com'
   senderForm.smtp_port = 465
   senderForm.note = ''
+  selectedPreset.value = ''
   showSenderModal.value = true
 }
 
 function openEditSenderModal(sender: StoredSender) {
   editingSenderId.value = sender.id
   senderForm.email = sender.email
-  senderForm.auth_code = sender.auth_code
+  senderForm.auth_code = ''
   senderForm.smtp_host = sender.smtp_host
   senderForm.smtp_port = sender.smtp_port
   senderForm.note = sender.note
+  selectedPreset.value = ''
   showSenderModal.value = true
 }
 
 async function submitSenderForm() {
-  if (!senderForm.email.trim() || !senderForm.auth_code.trim()) return
+  if (!senderForm.email.trim() || (!editingSenderId.value && !senderForm.auth_code.trim())) return
   try {
     if (editingSenderId.value) {
       await request<StoredSender>(`/api/sender-configs/${editingSenderId.value}`, {
@@ -408,20 +449,6 @@ async function toggleSender(sender: StoredSender) {
   }
 }
 
-function parseRecipients(value: string): RecipientItem[] {
-  const seen = new Set<string>()
-  return value
-    .split(/[\n,;，；\s]+/)
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean)
-    .filter((email) => {
-      if (seen.has(email)) return false
-      seen.add(email)
-      return true
-    })
-    .map((email) => ({ email, name: '' }))
-}
-
 function syncRecipients(nextRecipients: RecipientItem[]) {
   recipientsText.value = nextRecipients.map((recipient) => recipient.email).join('\n')
   if (recipientPage.value > recipientTotalPages.value) {
@@ -431,21 +458,33 @@ function syncRecipients(nextRecipients: RecipientItem[]) {
 
 function onRecipientsInput() {
   recipientPage.value = 1
+  recipientInputDirty.value = true
+  recipientImportMessage.value = ''
+  recipientError.value = ''
 }
 
 async function parseRecipientsText() {
+  if (parsingRecipients.value) return
   recipientError.value = ''
+  recipientImportMessage.value = ''
+  errorMessage.value = ''
   const items = parseRecipients(recipientsText.value)
   if (!items.length) {
     recipientError.value = '请输入有效的邮箱地址'
     return
   }
-  const invalid = items.filter((item) => !isValidEmail(item.email))
-  if (invalid.length) {
-    recipientError.value = `以下邮箱格式无效：${invalid.map((i) => i.email).join(', ')}`
-    return
+  parsingRecipients.value = true
+  try {
+    await saveRecipientsToDb(items)
+    recipientsText.value = storedRecipients.value.map((r) => r.email).join('\n')
+    recipientPage.value = 1
+    recipientInputDirty.value = false
+    recipientImportMessage.value = `已保存 ${storedRecipients.value.length} 个邮箱，复制格式已清理，重复地址已合并`
+  } catch (error) {
+    recipientError.value = error instanceof Error ? error.message : '保存收件人失败'
+  } finally {
+    parsingRecipients.value = false
   }
-  await saveRecipientsToDb(items)
 }
 
 function openAddRecipientModal() {
@@ -457,7 +496,7 @@ function openAddRecipientModal() {
 
 async function confirmAddRecipient() {
   modalRecipientError.value = ''
-  const email = modalRecipientEmail.value.trim().toLowerCase()
+  const email = normalizeCopiedEmail(modalRecipientEmail.value)
   if (!email) return
   if (!isValidEmail(email)) {
     modalRecipientError.value = `邮箱格式无效：${email}`
@@ -487,26 +526,21 @@ async function confirmAddRecipient() {
   }
 }
 
-async function loadRecipientsFromDb() {
+async function loadRecipientsFromDb(syncInput = true) {
   try {
     storedRecipients.value = await request<StoredRecipient[]>('/api/recipients')
-    if (storedRecipients.value.length > 0) {
-      recipientsText.value = storedRecipients.value.map((r) => r.email).join('\n')
-    }
+    if (syncInput && !recipientInputDirty.value) recipientsText.value = storedRecipients.value.map((r) => r.email).join('\n')
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '获取收件人失败'
   }
 }
 
 async function saveRecipientsToDb(items: RecipientItem[]) {
-  try {
-    storedRecipients.value = await request<StoredRecipient[]>('/api/recipients/batch', {
-      method: 'POST',
-      body: JSON.stringify(items.map((r) => ({ email: r.email }))),
-    })
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '保存收件人失败'
-  }
+  await request<StoredRecipient[]>('/api/recipients/batch', {
+    method: 'POST',
+    body: JSON.stringify(items.map((r) => ({ email: r.email }))),
+  })
+  storedRecipients.value = await request<StoredRecipient[]>('/api/recipients')
 }
 
 async function removeRecipient(email: string) {
@@ -556,7 +590,7 @@ function openEditRecipientModal(recipient: StoredRecipient) {
 
 async function confirmEditRecipient() {
   if (!editingRecipient.value) return
-  const email = editRecipientEmail.value.trim().toLowerCase()
+  const email = normalizeCopiedEmail(editRecipientEmail.value)
   if (!email || !isValidEmail(email)) {
     errorMessage.value = `邮箱格式无效：${email}`
     return
@@ -587,8 +621,10 @@ function buildPayloadFormData() {
       content: {
         subject: content.subject,
         body: content.body,
+        content_type: content.content_type,
       },
-      senders: senders.value,
+      sender_ids: enabledSenders.value.map(sender => Number(sender.id)),
+      request_id: submission?.id,
       recipients: enabledRecipients.value,
     }),
   )
@@ -620,6 +656,7 @@ function validateAttachment(file: File) {
 }
 
 function appendAttachments(fileList: FileList | File[]) {
+  if (templateLoading.value) return
   attachmentError.value = ''
   const nextFiles = [...attachments.value]
   Array.from(fileList).forEach((file) => {
@@ -647,30 +684,6 @@ function handleAttachmentDrop(event: DragEvent) {
 
 function removeAttachment(index: number) {
   attachments.value = attachments.value.filter((_, fileIndex) => fileIndex !== index)
-}
-
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(text || `请求失败：${response.status}`)
-  }
-  return response.json() as Promise<T>
-}
-
-async function requestForm<T>(path: string, body: FormData): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    body,
-  })
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(text || `请求失败：${response.status}`)
-  }
-  return response.json() as Promise<T>
 }
 
 async function loadTasks() {
@@ -926,6 +939,7 @@ function switchStatsPeriod(period: StatsPeriod) {
 }
 
 async function saveCurrentMail() {
+  if (templateLoading.value || templateError.value) return
   const subject = content.subject.trim()
   const body = content.body.trim()
   if (!subject || !body) {
@@ -936,6 +950,7 @@ async function saveCurrentMail() {
     const formData = new FormData()
     formData.append('subject', subject)
     formData.append('body', body)
+    formData.append('content_type', content.content_type)
     attachments.value.forEach((file) => {
       formData.append('attachments', file)
     })
@@ -952,7 +967,7 @@ function formatDate(iso: string) {
 }
 
 function getAttachmentUrl(mail: SavedMail, filename: string) {
-  return `${API_BASE}/api/saved-mails/${mail.id}/attachments/${filename}`
+  return `/api/saved-mails/${mail.id}/attachments/${encodeURIComponent(filename)}`
 }
 
 function barHeight(value: number, maxValue: number): string {
@@ -984,7 +999,7 @@ function buildGridItems(period: StatsPeriod): StatItem[] {
 
   if (period === 'hour') {
     return Array.from({ length: 24 }, (_, i) => ({
-      label: `${mon}-${day} ${String(i).padStart(2, '0')}:00`,
+      label: `${y}-${mon}-${day} ${String(i).padStart(2, '0')}:00`,
       total: 0,
       success: 0,
       failed: 0,
@@ -993,7 +1008,7 @@ function buildGridItems(period: StatsPeriod): StatItem[] {
   if (period === 'day') {
     const daysInMonth = new Date(y, m, 0).getDate()
     return Array.from({ length: daysInMonth }, (_, i) => ({
-      label: `${mon}-${String(i + 1).padStart(2, '0')}`,
+      label: `${y}-${mon}-${String(i + 1).padStart(2, '0')}`,
       total: 0,
       success: 0,
       failed: 0,
@@ -1015,25 +1030,14 @@ function buildGridItems(period: StatsPeriod): StatItem[] {
   }))
 }
 
-function fillGridData(grid: StatItem[], data: StatItem[], period: StatsPeriod): StatItem[] {
-  return grid.map((item) => {
-    let match: StatItem | undefined
-    if (period === 'hour') {
-      const h = item.label.split(' ')[1]
-      match = data.find((s) => s.label.split(' ')[1] === h)
-    } else if (period === 'week') {
-      const wn = item.label.split('-')[2]
-      match = data.find((s) => s.label.split('-')[2] === wn)
-    } else {
-      match = data.find((s) => s.label === item.label)
-    }
-    return match || item
-  })
+function fillGridData(grid: StatItem[], data: StatItem[]): StatItem[] {
+  const byLabel = new Map(data.map(item => [item.label, item]))
+  return grid.map(item => byLabel.get(item.label) ?? item)
 }
 
 function chartLabel(label: string, period: StatsPeriod): string {
   if (period === 'hour') return label.split(' ')[1] || label
-  if (period === 'day') return label.split('-')[1] || label
+  if (period === 'day') return label.split('-')[2] || label
   if (period === 'week') {
     const w = label.split('-')[2]
     return w ? `第${w}周` : label
@@ -1064,32 +1068,56 @@ const successRateClass = computed(() => {
 const gridItems = computed(() => {
   if (!statsData.value) return null
   const grid = buildGridItems(statsPeriod.value)
-  return fillGridData(grid, statsData.value.stats, statsPeriod.value)
+  return fillGridData(grid, statsData.value.stats)
 })
 
 async function selectSavedMail(mail: SavedMail) {
+  const version = ++templateVersion
+  templateAbort?.abort()
+  templateAbort = new AbortController()
+  const signal = templateAbort.signal
   selectedSavedMailId.value = mail.id
   content.subject = mail.subject
   content.body = mail.body
+  content.content_type = mail.content_type ?? 'plain'
   attachments.value = []
-  if (mail.attachments && mail.attachments.length > 0) {
-    const files: File[] = []
-    for (const att of mail.attachments) {
-      try {
-        const url = getAttachmentUrl(mail, att)
-        const response = await fetch(url)
-        if (response.ok) {
-          const blob = await response.blob()
-          const originalName = att.split('_').slice(1).join('_') || att
-          files.push(new File([blob], originalName, { type: blob.type }))
-        }
-      } catch {
-        continue
-      }
-    }
-    if (files.length) {
-      attachments.value = files
-    }
+  templateError.value = ''
+  templateLoading.value = true
+  try {
+    const files = await Promise.all(mail.attachments.map(async name => {
+      const response = await apiFetch(getAttachmentUrl(mail, name), { signal })
+      const blob = await response.blob()
+      return new File([blob], name.split('_').slice(1).join('_') || name, { type: blob.type })
+    }))
+    if (version === templateVersion) attachments.value = files
+  } catch (error) {
+    if (version === templateVersion) templateError.value = `模板附件未完整加载，已阻止发送。${error instanceof Error ? error.message : '请重新选择模板'}`
+  } finally {
+    if (version === templateVersion) templateLoading.value = false
+  }
+}
+
+async function downloadAttachment(mail: SavedMail, name: string) {
+  try {
+    const blob = await (await apiFetch(getAttachmentUrl(mail, name))).blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = name.split('_').slice(1).join('_') || name
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '附件下载失败'
+  }
+}
+
+async function resumeTask(task: TaskSummary, retryUncertain = false) {
+  if (retryUncertain && !confirm('这些邮件上次发送时连接中断，可能已经送达。请先在发件箱核对，确认需要重新发送后继续。')) return
+  try {
+    await request(`/api/tasks/${task.task_id}/resume`, { method: 'POST', body: JSON.stringify({ retry_uncertain: retryUncertain }) })
+    await loadTasks()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '恢复失败'
   }
 }
 
@@ -1113,12 +1141,16 @@ async function confirmDeleteSavedMail(id: number) {
 
 async function submitTask() {
   if (!canSend.value) return
+  const signature = JSON.stringify([content, enabledSenders.value.map(s => s.id), enabledRecipients.value,
+    attachments.value.map(f => [f.name, f.size, f.lastModified])])
+  if (!submission || submission.signature !== signature) submission = { signature, id: crypto.randomUUID() }
   loading.value = true
   errorMessage.value = ''
   try {
     const task = await requestForm<TaskSummary>('/api/tasks', buildPayloadFormData())
     currentTaskId.value = task.task_id
-    await loadTasks()
+    submission = null
+    await Promise.all([loadTasks(), loadRecipientsFromDb(false)])
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '创建任务失败'
   } finally {
@@ -1134,6 +1166,8 @@ function statusText(status: TaskStatus | SendStatus) {
     sending: '发送中',
     success: '成功',
     failed: '失败',
+    interrupted: '已中断',
+    uncertain: '待核对',
   }
   return map[status]
 }
@@ -1154,13 +1188,17 @@ onMounted(() => {
   void loadRecipientsFromDb()
   void loadSavedMails()
   void loadAllStats()
-  timer = window.setInterval(() => {
-    void loadTasks()
-    void loadAllStats()
+  timer = window.setInterval(async () => {
+    if (polling) return
+    polling = true
+    try { await Promise.all([loadTasks(), loadAllStats(), loadRecipientsFromDb(false)]) }
+    finally { polling = false }
   }, 3000)
 })
 
 onUnmounted(() => {
+  templateAbort?.abort()
+  templateVersion++
   if (timer !== undefined) {
     window.clearInterval(timer)
     timer = undefined
@@ -1169,7 +1207,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <DesktopTitleBar />
+  <div class="app-shell" :class="{ 'desktop-shell': isDesktop }">
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark">M</span>
@@ -1209,6 +1248,9 @@ onUnmounted(() => {
       </header>
 
       <p v-if="errorMessage" class="notice">{{ errorMessage }}</p>
+      <p v-if="recipientInputDirty && activeSection === 'home'" class="notice">
+        收件人输入已修改，请先到“目标邮箱”完成解析，再开始群发。
+      </p>
 
       <section v-if="activeSection === 'home'" class="module-section">
         <div class="section-heading">
@@ -1251,8 +1293,8 @@ onUnmounted(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="task in pagedTasks" :key="task.task_id" @click="currentTaskId = task.task_id">
-                  <td>{{ task.task_id.slice(0, 10) }}</td>
+                <tr v-for="task in pagedTasks" :key="task.task_id" @click="currentTaskId = task.task_id; showTaskDetail = true">
+                  <td><strong>{{ task.subject || '历史任务' }}</strong><br /><small>{{ task.task_id.slice(0, 10) }}</small></td>
                   <td>{{ task.total }}</td>
                   <td>
                     <div class="task-progress-text">{{ task.success + task.failed }} / {{ task.total }}</div>
@@ -1260,7 +1302,10 @@ onUnmounted(() => {
                       <i :style="{ width: `${task.progress}%` }"></i>
                     </div>
                   </td>
-                  <td><span class="status" :class="task.status">{{ statusText(task.status) }}</span></td>
+                  <td><span class="status" :class="task.status">{{ statusText(task.status) }}</span>
+                    <button v-if="task.status === 'interrupted' && task.resumable" class="text-button" @click.stop="resumeTask(task)">继续未发送</button>
+                    <button v-if="task.status === 'interrupted' && task.uncertain" class="text-button" @click.stop="resumeTask(task, true)">核对后重试 {{ task.uncertain }} 封</button>
+                  </td>
                   <td>{{ formatDate(task.updated_at) }}</td>
                 </tr>
                 <tr v-if="!pagedTasks.length">
@@ -1295,13 +1340,15 @@ onUnmounted(() => {
                 <h2>内容编辑</h2>
               </div>
               <div class="editor-actions">
-                <button class="primary add-sender-btn" :disabled="!content.subject.trim() || !content.body.trim()" @click="saveCurrentMail">
+                <button class="primary add-sender-btn" :disabled="!content.subject.trim() || !content.body.trim() || templateLoading || Boolean(templateError)" @click="saveCurrentMail">
                   保存
                 </button>
               </div>
             </div>
             <label>邮件主题</label>
             <input v-model="content.subject" placeholder="请输入邮件主题" />
+            <label>正文格式</label>
+            <select v-model="content.content_type" aria-label="正文格式"><option value="plain">纯文本</option><option value="html">HTML</option></select>
             <label>邮件正文</label>
             <textarea v-model="content.body" class="mail-body" placeholder="输入需要群发的邮件内容"></textarea>
 
@@ -1311,12 +1358,14 @@ onUnmounted(() => {
               @dragover.prevent
               @drop.prevent="handleAttachmentDrop"
             >
-              <input id="attachment-input" multiple type="file" @change="handleAttachmentChange" />
+              <input id="attachment-input" :disabled="templateLoading" multiple type="file" @change="handleAttachmentChange" />
               <label for="attachment-input" class="upload-trigger">
                 <strong>选择本地文件</strong>
                 <span>或将文件拖拽到此处。单个附件不超过 50MB，已拦截 exe、bat、cmd、js、vbs、msi 等高风险类型。</span>
               </label>
             </div>
+            <p v-if="templateLoading" class="field-hint" role="status">正在加载模板附件，完成后即可发送…</p>
+            <p v-if="templateError" class="field-error" role="alert">{{ templateError }}</p>
             <p v-if="attachmentError" class="field-error">{{ attachmentError }}</p>
             <div v-if="attachments.length" class="attachment-list">
               <div v-for="(file, index) in attachments" :key="`${file.name}-${file.size}`" class="attachment-item">
@@ -1480,16 +1529,17 @@ onUnmounted(() => {
               <textarea
                 v-model="recipientsText"
                 class="recipient-box"
-                placeholder="每行一个邮箱，也可用逗号、分号分隔"
+                placeholder="每行一个邮箱，也可粘贴邮箱链接或 Markdown 表格；支持逗号、分号分隔"
                 @input="onRecipientsInput"
               ></textarea>
               <p v-if="recipientError" class="field-error">{{ recipientError }}</p>
+              <p v-if="recipientImportMessage" role="status" class="summary-line">{{ recipientImportMessage }}</p>
               <div class="parse-bar">
-                <button class="primary parse-btn" @click="parseRecipientsText">
+                <button class="primary parse-btn" :disabled="parsingRecipients" @click="parseRecipientsText">
                   <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13">
                     <path d="M8 0a1 1 0 011 1v6h6a1 1 0 010 2H9v6a1 1 0 01-2 0V9H1a1 1 0 010-2h6V1a1 1 0 011-1z"/>
                   </svg>
-                  解析
+                  {{ parsingRecipients ? '解析中...' : '解析' }}
                 </button>
                 <span class="summary-line">共 {{ recipients.length }} 个邮箱，重复已自动合并</span>
               </div>
@@ -1599,7 +1649,7 @@ onUnmounted(() => {
             <strong>{{ dashboard.totalTasks }}</strong>
           </div>
           <div class="metric-card">
-            <span>邮件总量</span>
+            <span>本期邮件总量</span>
             <strong>{{ totalAll }}</strong>
           </div>
           <div class="metric-card">
@@ -1607,7 +1657,7 @@ onUnmounted(() => {
             <strong>{{ dashboard.running }}</strong>
           </div>
           <div class="metric-card success">
-            <span>发送成功</span>
+            <span>本期发送成功</span>
             <strong>
               {{ totalSuccess }}
               <small v-if="statsData && statsData.success_prev" class="trend" :class="totalSuccess >= statsData.success_prev ? 'trend-up' : 'trend-down'">
@@ -1616,7 +1666,7 @@ onUnmounted(() => {
             </strong>
           </div>
           <div class="metric-card danger">
-            <span>发送失败</span>
+            <span>本期发送失败</span>
             <strong>
               {{ totalFailed }}
               <small v-if="statsData && statsData.failed_prev" class="trend" :class="totalFailed <= statsData.failed_prev ? 'trend-up' : 'trend-down'">
@@ -1625,7 +1675,7 @@ onUnmounted(() => {
             </strong>
           </div>
           <div class="metric-card">
-            <span>发送成功率</span>
+            <span>本期成功率</span>
             <strong class="success-rate" :class="successRateClass">
               {{ statsData ? overallRate + '%' : '-' }}
               <small v-if="trendArrow" class="trend" :class="trendArrow.up ? 'trend-up' : 'trend-down'">
@@ -2076,7 +2126,12 @@ onUnmounted(() => {
               <button class="modal-close" @click="showSenderModal = false">&times;</button>
             </div>
             <div class="modal-body">
-              <label>QQ 邮箱</label>
+              <label>邮箱类型</label>
+              <select v-model="selectedPreset" @change="applyPreset">
+                <option value="">自定义</option>
+                <option v-for="p in emailPresets" :key="p.type" :value="p.type">{{ p.label }}</option>
+              </select>
+              <label>邮箱地址</label>
               <input v-model="senderForm.email" placeholder="example@qq.com" />
               <label @mouseenter="showHelpTooltip = true" @mouseleave="showHelpTooltip = false" class="auth-label">
                 SMTP授权码
@@ -2085,7 +2140,7 @@ onUnmounted(() => {
                 </span>
                 <span v-if="showHelpTooltip" class="help-tip" @click.stop="goToHelp">如何获取授权码？</span>
               </label>
-              <input v-model="senderForm.auth_code" type="password" placeholder="授权码" />
+              <input v-model="senderForm.auth_code" type="password" autocomplete="new-password" :placeholder="editingSenderId ? '留空保留原授权码' : '授权码'" />
               <label>SMTP 地址</label>
               <input v-model="senderForm.smtp_host" />
               <label>端口</label>
@@ -2095,7 +2150,7 @@ onUnmounted(() => {
             </div>
             <div class="modal-foot">
               <button class="ghost" @click="showSenderModal = false">取消</button>
-              <button class="primary" :disabled="!senderForm.email.trim() || !senderForm.auth_code.trim()" @click="submitSenderForm">
+              <button class="primary" :disabled="!senderForm.email.trim() || (!editingSenderId && !senderForm.auth_code.trim())" @click="submitSenderForm">
                 {{ editingSenderId ? '保存' : '添加' }}
               </button>
             </div>
@@ -2167,7 +2222,7 @@ onUnmounted(() => {
                     <path d="M4 1h5l4 4v9.5a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1zm5 .5V5h3.5L9 1.5z"/>
                   </svg>
                   <span>{{ att.split('_').slice(1).join('_') }}</span>
-                  <a :href="getAttachmentUrl(detailMail, att)" class="download-link" target="_blank">下载</a>
+                  <button class="text-button download-link" @click="downloadAttachment(detailMail, att)">下载</button>
                 </div>
               </div>
               <p v-else class="detail-field" style="color:#94a3b8">无附件</p>
@@ -2175,6 +2230,21 @@ onUnmounted(() => {
             <div class="modal-foot">
               <button class="primary" @click="showDetailModal = false">关闭</button>
             </div>
+          </div>
+        </div>
+      </Teleport>
+      <Teleport to="body">
+        <div v-if="showTaskDetail && selectedTask" class="modal-overlay" @click.self="showTaskDetail = false">
+          <div class="modal-panel task-detail-dialog" role="dialog" aria-modal="true" aria-label="任务详情">
+            <div class="modal-head"><h2>{{ selectedTask.subject || '任务详情' }}</h2><button class="modal-close" aria-label="关闭任务详情" @click="showTaskDetail = false">&times;</button></div>
+            <div class="modal-body">
+              <p>{{ statusText(selectedTask.status) }} · 成功 {{ selectedTask.success }} · 失败 {{ selectedTask.failed }} · 待处理 {{ selectedTask.pending }}</p>
+              <p v-if="selectedTask.uncertain" class="field-error">{{ selectedTask.uncertain }} 封邮件的送达状态尚未确认，请先在发件箱核对，避免重复发送。</p>
+              <div class="table-wrap"><table><thead><tr><th>收件人</th><th>发件人</th><th>结果</th><th>说明</th></tr></thead>
+                <tbody><tr v-for="item in selectedTask.assignments" :key="item.recipient"><td>{{ item.recipient }}</td><td>{{ item.sender }}</td><td>{{ statusText(item.status) }}</td><td>{{ item.message || '-' }}</td></tr>
+                <tr v-if="!selectedTask.assignments.length"><td colspan="4">此旧版任务没有可用的发送明细。</td></tr></tbody></table></div>
+            </div>
+            <div class="modal-foot"><button class="primary" @click="showTaskDetail = false">关闭</button></div>
           </div>
         </div>
       </Teleport>
@@ -2195,6 +2265,14 @@ onUnmounted(() => {
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+.desktop-shell { padding-top: 42px; }
+.desktop-shell .sidebar { top: 42px; height: calc(100vh - 42px); }
+.task-detail-dialog { width: min(1000px, 92vw); max-width: 1000px; }
+.task-detail-dialog .modal-body { max-height: 65vh; overflow: auto; }
+.status.interrupted, .status.uncertain { color: #9a5a16; background: #fff3df; }
+.field-hint { color: #56718d; font-size: 13px; }
+button:focus-visible, a:focus-visible { outline: 2px solid #517fae; outline-offset: 3px; }
+
 .app-shell {
   display: flex;
   min-height: 100vh;
@@ -2202,6 +2280,7 @@ onUnmounted(() => {
 
 .sidebar {
   width: 228px;
+  flex-shrink: 0;
   padding: 24px 18px;
   background: #182230;
   color: #d9e1eb;
@@ -2262,6 +2341,7 @@ nav button:hover {
 
 .workspace {
   flex: 1;
+  min-width: 0;
   padding: 26px;
   overflow: auto;
 }
@@ -3204,7 +3284,8 @@ th {
   }
 
   .sidebar {
-    display: none;
+    width: 176px;
+    padding: 20px 12px;
   }
 }
 
@@ -4215,5 +4296,22 @@ th:has(.help-icon-wrap) {
   border-radius: 4px;
   background: #fed7aa;
   font-size: 12px;
+}
+
+.preset-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 0;
+}
+
+.preset-select-wrap {
+  flex: 1;
+}
+
+.preset-label {
+  font-size: 12px;
+  color: #64748b;
+  margin: 0 0 4px 0;
+  font-weight: 500;
 }
 </style>

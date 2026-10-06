@@ -1,0 +1,29 @@
+{
+  "name": "mail-group-desktop",
+  "version": "3.0.0",
+  "private": true,
+  "description": "邮件群发桌面客户端",
+  "author": "Mail Group",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --win dir --x64",
+    "dist": "electron-builder --win nsis portable --x64"
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.mailgroup.desktop",
+    "productName": "邮件群发助手",
+    "directories": { "output": "../release/desktop-v3" },
+    "files": ["main.cjs", "preload.cjs", "loading.html", "loading.js", "package.json"],
+    "electronDist": "node_modules/electron/dist",
+    "extraResources": [{ "from": "../build/backend/mail-group-service", "to": "backend", "filter": ["**/*"] }],
+    "asar": true,
+    "win": { "icon": "../release/mail.ico", "target": ["nsis", "portable"], "signExecutable": false },
+    "nsis": { "artifactName": "MailGroup-${version}-${arch}-nsis.${ext}", "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false, "createDesktopShortcut": true, "shortcutName": "邮件群发助手", "deleteAppDataOnUninstall": false },
+    "portable": { "artifactName": "MailGroup-${version}-${arch}-portable.${ext}", "requestExecutionLevel": "user" }
+  }
+}

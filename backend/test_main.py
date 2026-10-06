@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import tempfile
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,29 +15,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from main import init_db
 
 
-@pytest.fixture(autouse=True)
-def _test_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    """使用临时数据库，测试之间互不干扰"""
-    tmp = tempfile.mkdtemp()
-    db_path = os.path.join(tmp, "test.sqlite3")
-    monkeypatch.setattr("main.DB_PATH", db_path)
-    monkeypatch.setattr("main.DATA_DIR", tmp)
-    monkeypatch.setattr("main.SAVED_ATTACHMENTS_DIR", os.path.join(tmp, "saved_attachments"))
-    # 重置全局连接
-    import main as main_module
-    main_module._shared_conn = None
-    init_db()
-    yield
-
-
-@pytest.fixture
-def client(_test_db: None) -> TestClient:
-    from main import app
-    return TestClient(app)
+def saved_sender(client, email="sender@example.com", enabled=True):
+    sender = client.post("/api/sender-configs", json={"email": email, "auth_code": "test-only"}).json()
+    if not enabled:
+        client.patch(f"/api/sender-configs/{sender['id']}/toggle")
+    return sender["id"]
 
 
 SENDER_PAYLOAD = {
-    "email": "test_sender@qq.com",
+    "email": "test_sender@example.com",
     "auth_code": "abcdefghijklmnop",
     "smtp_host": "smtp.qq.com",
     "smtp_port": 465,
@@ -72,7 +60,8 @@ class TestSenders:
         assert resp.status_code == 200
         data = resp.json()
         assert data["email"] == SENDER_PAYLOAD["email"]
-        assert data["auth_code"] == SENDER_PAYLOAD["auth_code"]
+        assert "auth_code" not in data
+        assert data["has_auth_code"] is True
         assert data["enabled"] is True
         assert "id" in data
 
@@ -108,7 +97,7 @@ class TestSenders:
         assert resp.status_code == 422
 
     def test_create_sender_empty_auth_code(self, client: TestClient) -> None:
-        resp = client.post("/api/sender-configs", json={"email": "empty@qq.com", "auth_code": ""})
+        resp = client.post("/api/sender-configs", json={"email": "empty@example.com", "auth_code": ""})
         assert resp.status_code == 422
 
 
@@ -148,23 +137,23 @@ class TestRecipients:
         assert resp.json()["enabled"] is True
 
     def test_batch_toggle_enable(self, client: TestClient) -> None:
-        client.post("/api/recipients", json={"email": "a@test.com"})
-        client.post("/api/recipients", json={"email": "b@test.com"})
+        client.post("/api/recipients", json={"email": "a@example.com"})
+        client.post("/api/recipients", json={"email": "b@example.com"})
         resp = client.post("/api/recipients/batch-toggle", json={"enabled": True})
         assert resp.status_code == 200
 
     def test_batch_toggle_disable(self, client: TestClient) -> None:
-        client.post("/api/recipients", json={"email": "a@test.com"})
+        client.post("/api/recipients", json={"email": "a@example.com"})
         resp = client.post("/api/recipients/batch-toggle", json={"enabled": False})
         assert resp.status_code == 200
 
     def test_update_recipient(self, client: TestClient) -> None:
         create_resp = client.post("/api/recipients", json=RECIPIENT_PAYLOAD)
         rid = create_resp.json()["id"]
-        resp = client.patch(f"/api/recipients/{rid}", json={"email": "updated@test.com", "note": "新备注"})
+        resp = client.patch(f"/api/recipients/{rid}", json={"email": "updated@example.com", "note": "新备注"})
         assert resp.status_code == 200
         data = resp.json()
-        assert data["email"] == "updated@test.com"
+        assert data["email"] == "updated@example.com"
         assert data["note"] == "新备注"
 
     def test_delete_recipient(self, client: TestClient) -> None:
@@ -179,16 +168,16 @@ class TestRecipients:
 
     def test_batch_create_recipients(self, client: TestClient) -> None:
         payload = [
-            {"email": "batch1@test.com", "note": "批量1"},
-            {"email": "batch2@test.com", "note": "批量2"},
-            {"email": "batch3@test.com", "note": ""},
+            {"email": "batch1@example.com", "note": "批量1"},
+            {"email": "batch2@example.com", "note": "批量2"},
+            {"email": "batch3@example.com", "note": ""},
         ]
         resp = client.post("/api/recipients/batch", json=payload)
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 3
-        assert data[0]["email"] == "batch1@test.com"
-        assert data[1]["email"] == "batch2@test.com"
+        assert data[0]["email"] == "batch1@example.com"
+        assert data[1]["email"] == "batch2@example.com"
 
     def test_create_recipient_empty_email(self, client: TestClient) -> None:
         resp = client.post("/api/recipients", json={"email": ""})
@@ -202,8 +191,8 @@ class TestPreview:
     def test_preview_assignments(self, client: TestClient) -> None:
         payload = {
             "content": {"subject": "测试", "body": "内容"},
-            "senders": [{"email": "s1@qq.com", "auth_code": "1234567890123456"}],
-            "recipients": [{"email": "r1@test.com"}, {"email": "r2@test.com"}, {"email": "r3@test.com"}],
+            "sender_ids": [saved_sender(client, "s1@example.com", enabled=True)],
+            "recipients": [{"email": "r1@example.com"}, {"email": "r2@example.com"}, {"email": "r3@example.com"}],
         }
         resp = client.post("/api/assignments/preview", json=payload)
         assert resp.status_code == 200
@@ -215,7 +204,7 @@ class TestPreview:
     def test_preview_no_recipients(self, client: TestClient) -> None:
         payload = {
             "content": {"subject": "测试", "body": "内容"},
-            "senders": [{"email": "s1@qq.com", "auth_code": "1234567890123456"}],
+            "sender_ids": [saved_sender(client, "s1@example.com", enabled=True)],
             "recipients": [],
         }
         resp = client.post("/api/assignments/preview", json=payload)
@@ -224,11 +213,143 @@ class TestPreview:
     def test_preview_no_enabled_sender(self, client: TestClient) -> None:
         payload = {
             "content": {"subject": "测试", "body": "内容"},
-            "senders": [{"email": "s1@qq.com", "auth_code": "1234567890123456", "enabled": False}],
-            "recipients": [{"email": "r1@test.com"}],
+            "sender_ids": [saved_sender(client, "s1@example.com", enabled=False)],
+            "recipients": [{"email": "r1@example.com"}],
         }
         resp = client.post("/api/assignments/preview", json=payload)
-        assert resp.status_code == 422
+        assert resp.status_code == 409
+
+
+# ── 批量导入后使用模板群发的回归测试 ──────────────────────────────────────
+
+
+class TestBatchTemplateSending:
+    def test_150_recipients_with_template_and_attachment(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        import main
+
+        # 只检查任务创建；不连接 SMTP，不发送真实邮件。
+        monkeypatch.setattr(main, "run_task", AsyncMock())
+        monkeypatch.setattr(main, "TASKS", {})
+        recipients = [{"email": f"user{i}@example.com"} for i in range(150)]
+        imported = client.post("/api/recipients/batch", json=recipients)
+        assert imported.status_code == 200
+        assert len(imported.json()) == 150
+
+        saved = client.post("/api/saved-mails", data=MAIL_PAYLOAD, files={
+            "attachments": ("sample.txt", b"template attachment", "text/plain"),
+        })
+        assert saved.status_code == 200
+        template = client.get(f"/api/saved-mails/{saved.json()['id']}").json()
+        attachment = client.get(f"/api/saved-mails/{template['id']}/attachments/{template['attachments'][0]}")
+        assert attachment.status_code == 200
+        payload = {
+            "content": {"subject": template["subject"], "body": template["body"]},
+            "sender_ids": [saved_sender(client, "sender@example.com", enabled=True)],
+            "recipients": [{"email": r["email"]} for r in imported.json()],
+        }
+        result = client.post("/api/tasks", data={"payload": json.dumps(payload)}, files={
+            "attachments": ("sample.txt", attachment.content, "text/plain"),
+        })
+        assert result.status_code == 200
+        task = result.json()
+        assert task["total"] == 150
+        assert {a["recipient"] for a in task["assignments"]} == {r["email"] for r in recipients}
+        assert main.TASKS[task["task_id"]].attachments[0].content == b"template attachment"
+
+    @pytest.mark.parametrize("invalid_email", ["bad..address@example.com", "user@example.com.", "user@bad_domain.com", "user\u2060@example.com"])
+    def test_invalid_address_rejects_entire_import_before_writing(self, client: TestClient, invalid_email: str) -> None:
+        client.post("/api/recipients", json={"email": "existing@example.com"})
+        recipients = [{"email": f"user{i}@example.com"} for i in range(149)] + [{"email": invalid_email}]
+        result = client.post("/api/recipients/batch", json=recipients)
+        assert result.status_code == 422
+        assert result.json()["detail"][0]["loc"] == ["body", 149, "email"]
+        assert [r["email"] for r in client.get("/api/recipients").json()] == ["existing@example.com"]
+
+    def test_existing_invalid_recipient_identified_when_sending(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        import main
+
+        worker = AsyncMock()
+        monkeypatch.setattr(main, "run_task", worker)
+        monkeypatch.setattr(main, "TASKS", {})
+        payload = {
+            "content": MAIL_PAYLOAD,
+            "sender_ids": [saved_sender(client, "sender@example.com", enabled=True)],
+            "recipients": [{"email": f"user{i}@example.com"} for i in range(149)] + [{"email": "bad..address@example.com"}],
+        }
+        result = client.post("/api/tasks", data={"payload": json.dumps(payload)})
+        assert result.status_code == 400
+        error = result.json()["detail"][0]
+        assert error["loc"] == ["recipients", 149, "email"]
+        assert error["input"] == "bad..address@example.com"
+        assert "secret-test-only" not in result.text
+        assert not main.TASKS
+        worker.assert_not_called()
+
+    def test_other_task_validation_errors_keep_location_without_sensitive_input(self, client: TestClient) -> None:
+        payload = {
+            "content": {"subject": "x" * 201, "body": "private body"},
+            "senders": [{"email": "sender@example.com", "auth_code": "secret-test-only", "enabled": False}],
+            "recipients": [{"email": "user@example.com"}],
+        }
+        result = client.post("/api/tasks", data={"payload": json.dumps(payload)})
+        assert result.status_code == 400
+        assert ["content", "subject"] in [error["loc"] for error in result.json()["detail"]]
+        assert ["senders"] in [error["loc"] for error in result.json()["detail"]]
+        assert "secret-test-only" not in result.text
+        assert "private body" not in result.text
+        assert all("input" not in error for error in result.json()["detail"])
+
+    def test_invalid_json_returns_validation_error(self, client: TestClient) -> None:
+        result = client.post("/api/tasks", data={"payload": "{"})
+        assert result.status_code == 400
+        assert result.json()["detail"][0]["type"] == "json_invalid"
+
+    def test_single_and_edit_recipient_use_same_validation(self, client: TestClient) -> None:
+        assert client.post("/api/recipients", json={"email": "bad..address@example.com"}).status_code == 422
+        created = client.post("/api/recipients", json={"email": " User@Example.com "}).json()
+        assert created["email"] == "user@example.com"
+        assert client.patch(f"/api/recipients/{created['id']}", json={"email": "user@example.com."}).status_code == 422
+        assert client.get("/api/recipients").json()[0]["email"] == "user@example.com"
+        assert client.patch(f"/api/recipients/{created['id']}", json={"note": "valid note"}).status_code == 200
+
+    def test_sender_and_template_validated_before_saving(self, client: TestClient) -> None:
+        assert client.post("/api/sender-configs", json={**SENDER_PAYLOAD, "email": "bad..sender@example.com"}).status_code == 422
+        assert client.post("/api/saved-mails", data={"subject": "x" * 201, "body": "content"}).status_code == 422
+        assert client.get("/api/saved-mails").json() == []
+
+    @pytest.mark.parametrize("copied_email", ["\u200bUser@Example.com", "User@Example.com\u200b", "\ufeffUser@Example.com", "mailto:User@Example.com", " MAILTO:User@Example.com\u200b "])
+    def test_copy_artifacts_normalized_for_import_edit_and_task(self, client: TestClient, monkeypatch: pytest.MonkeyPatch, copied_email: str) -> None:
+        import main
+
+        monkeypatch.setattr(main, "run_task", AsyncMock())
+        monkeypatch.setattr(main, "TASKS", {})
+        imported = client.post("/api/recipients/batch", json=[{"email": copied_email}])
+        assert imported.status_code == 200
+        recipient = imported.json()[0]
+        assert recipient["email"] == "user@example.com"
+        edited = client.patch(f"/api/recipients/{recipient['id']}", json={"email": copied_email})
+        assert edited.status_code == 200
+        assert edited.json()["email"] == "user@example.com"
+        payload = {"content": MAIL_PAYLOAD, "sender_ids": [saved_sender(client, "sender@example.com", enabled=True)], "recipients": [{"email": copied_email}, {"email": "user@example.com"}]}
+        result = client.post("/api/tasks", data={"payload": json.dumps(payload)})
+        assert result.status_code == 200
+        assert result.json()["total"] == 1
+        assert result.json()["assignments"][0]["recipient"] == "user@example.com"
+
+    def test_success_disables_legacy_copied_addresses_and_duplicates(self, client: TestClient) -> None:
+        import main
+
+        # Emulate existing rows from the old import endpoint, bypassing current validation.
+        originals = ["user@example.com\u200b", "mailto:User@example.com", "user@example.com", "other@example.com"]
+        with main.db() as conn:
+            conn.executemany("INSERT INTO recipients (email, enabled, note, created_at) VALUES (?,1,'keep note','2026-01-01')", [(email,) for email in originals])
+            conn.commit()
+        main.disable_recipient("user@example.com")
+        records = client.get("/api/recipients").json()
+        assert all(not r["enabled"] for r in records if r["email"] != "other@example.com")
+        assert next(r for r in records if r["email"] == "other@example.com")["enabled"]
+        assert all(r["note"] == "keep note" for r in records)
+        assert {r["email"] for r in records} == set(originals)
 
 
 # ── 保存邮件 ──────────────────────────────────────────────────────────────
@@ -343,16 +464,16 @@ class TestWorkflow:
 
         # 2. 创建发送邮箱
         r1 = client.post("/api/sender-configs", json={
-            "email": "sender1@qq.com", "auth_code": "test1234567890", "note": "主邮箱",
+            "email": "sender1@example.com", "auth_code": "test1234567890", "note": "主邮箱",
         })
         assert r1.status_code == 200
 
         # 3. 创建收件人
-        r2 = client.post("/api/recipients", json={"email": "user1@test.com"})
+        r2 = client.post("/api/recipients", json={"email": "user1@example.com"})
         assert r2.status_code == 200
-        r3 = client.post("/api/recipients", json={"email": "user2@test.com"})
+        r3 = client.post("/api/recipients", json={"email": "user2@example.com"})
         assert r3.status_code == 200
-        r4 = client.post("/api/recipients", json={"email": "user3@test.com"})
+        r4 = client.post("/api/recipients", json={"email": "user3@example.com"})
         assert r4.status_code == 200
 
         # 4. 切换收件人状态
@@ -368,8 +489,8 @@ class TestWorkflow:
         # 6. 预览分配
         r7 = client.post("/api/assignments/preview", json={
             "content": {"subject": "群发测试", "body": "测试正文"},
-            "senders": [{"email": "sender1@qq.com", "auth_code": "test1234567890"}],
-            "recipients": [{"email": "user1@test.com"}, {"email": "user2@test.com"}, {"email": "user3@test.com"}],
+            "sender_ids": [saved_sender(client, "sender1@example.com", enabled=True)],
+            "recipients": [{"email": "user1@example.com"}, {"email": "user2@example.com"}, {"email": "user3@example.com"}],
         })
         assert r7.status_code == 200
         assert len(r7.json()) == 3
