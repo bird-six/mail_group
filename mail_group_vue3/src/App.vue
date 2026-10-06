@@ -2096,97 +2096,115 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section v-if="activeSection === 'help'" class="module-section">
+      <section v-if="activeSection === 'help'" class="module-section help-guide">
         <div class="section-heading">
           <span>05</span>
           <div>
             <h2>使用说明</h2>
-            <p>了解如何配置邮箱、获取授权码以及使用本系统。</p>
+            <p>适用于 3.2 桌面版：配置邮箱、随机模板群发、统一收发邮件与数据备份。</p>
           </div>
         </div>
-        <div class="panel">
+        <div class="help-topics" aria-label="使用说明目录">
+          <a href="#help-start">开始群发</a><a href="#help-templates">随机模板</a>
+          <a href="#help-mailbox">邮件汇总</a><a href="#help-auth">授权码与 IMAP</a>
+          <a href="#help-recovery">任务恢复</a><a href="#help-data">窗口与备份</a><a href="#help-faq">常见问题</a>
+        </div>
+        <div id="help-start" class="panel">
           <div class="panel-title">
-            <h2>系统使用教程</h2>
-            <span>从配置到发送，一步到位掌握群发操作</span>
+            <h2>第一次使用：从配置到群发</h2>
+            <span>点击“开始群发”会直接创建发送任务，请提前核对内容和收件人。</span>
           </div>
           <div class="help-card">
             <div class="help-step">
               <span class="help-num">1</span>
               <div>
-                <strong>配置发送邮箱（邮箱集群）</strong>
-                <p>进入 <b>"邮箱集群"</b> 页面，点击 <b>"添加发送邮箱"</b>，填写 QQ 邮箱地址、SMTP 授权码、SMTP 服务器地址（默认 smtp.qq.com）和端口（默认 465）。可以添加多个发送邮箱，系统会自动轮询分配。</p>
+                <strong>配置并启用发送账号</strong>
+                <p>进入“邮箱集群”，点击“添加邮箱”，选择邮箱类型，填写邮箱地址、SMTP授权码、SMTP 地址和端口。保存后检查账号处于启用状态；多个启用账号会均衡分配收件人。编辑账号时，授权码留空会保留原值。</p>
               </div>
             </div>
             <div class="help-step">
               <span class="help-num">2</span>
               <div>
-                <strong>添加目标邮箱</strong>
-                <p>进入 <b>"目标邮箱"</b> 页面，可以通过单条添加或批量粘贴的方式录入收件人邮箱。每个邮箱可附带备注，方便管理。系统会自动去重，避免重复发送。</p>
+                <strong>保存并核对收件人</strong>
+                <p>进入“目标邮箱”，单条添加，或在“收件人编辑”中粘贴地址后点击“解析”。支持换行、逗号、分号、邮箱链接和 Markdown 表格，重复地址自动合并。检查解析结果、启用状态和“分配预览”；修改输入后必须再次解析，才能群发。</p>
               </div>
             </div>
             <div class="help-step">
               <span class="help-num">3</span>
               <div>
-                <strong>编写邮件内容</strong>
-                <p>进入 <b>"邮件内容"</b> 页面，填写邮件主题和正文。支持纯文本和 HTML 两种格式，可添加附件（单个不超过 50MB）。编辑完成后点击 <b>"保存邮件"</b>。</p>
+                <strong>选择发送内容</strong>
+                <p>进入“邮件内容”。使用“当前编辑内容”时，填写主题、选择纯文本或 HTML 并填写正文，可添加附件；无需保存为模板也能发送。点击“保存”会将内容和附件新增为一个模板。需要多种内容时，按下方“随机模板”说明操作。</p>
               </div>
             </div>
             <div class="help-step">
               <span class="help-num">4</span>
               <div>
-                <strong>预览分配并发送</strong>
-                <p>回到 <b>"首页"</b>，在 <b>"发送邮件"</b> 区域可以预览每次发送的邮件分配情况（哪个邮箱发给哪个收件人）。确认无误后点击 <b>"开始发送"</b>，系统将并行发送邮件，实时显示进度。</p>
+                <strong>开始群发</strong>
+                <p>回到“首页”，核对显示的内容来源或模板数量，确认收件人后点击“开始群发”。同一发送邮箱的相邻邮件间隔为 20～40 秒，多个任务也共用此间隔；不同发送邮箱可以并行工作。</p>
               </div>
             </div>
             <div class="help-step">
               <span class="help-num">5</span>
               <div>
-                <strong>查看数据面板</strong>
-                <p>进入 <b>"数据面板"</b>，可以查看发送进度、发送量 &amp; 成功率趋势图、失败原因分布饼图以及失败邮箱列表。支持按小时/天/周/月切换统计维度，失败邮箱可一键导出 TXT 文件。</p>
+                <strong>查看任务和统计</strong>
+                <p>在首页点击任务行，查看每位收件人的发送邮箱、邮件主题、状态和结果。“数据面板”提供发送统计、失败原因及失败邮箱导出。成功发送的收件人会自动禁用；确需再次发送时，请先手动启用。</p>
               </div>
             </div>
           </div>
         </div>
-        <div class="panel">
+        <div id="help-templates" class="panel">
+          <div class="panel-title"><h2>多选模板，随机发送</h2><span>主题、正文格式和附件始终随同一个模板发送。</span></div>
+          <div class="help-card">
+            <div class="help-step"><span class="help-num">1</span><div><strong>准备并勾选模板</strong><p>先在“当前编辑内容”模式下编写邮件并点击“保存”。在“选择邮件模板”列表中勾选多个模板，或点击“全选”，页面会切换为“随机使用选中模板”。</p></div></div>
+            <div class="help-step"><span class="help-num">2</span><div><strong>理解随机选择规则</strong><p>每位收件人独立、等概率地抽取一个已选模板，可能重复抽中同一个，不保证平均分配。只选一个模板时全部使用该模板；“清空选择”后无法随机发送。编辑器中未保存的内容和附件不会混入随机任务。</p></div></div>
+            <div class="help-step"><span class="help-num">3</span><div><strong>修改内容与恢复任务</strong><p>点击模板的“载入编辑”会切换回“当前编辑内容”；修改后点击“保存”会新增模板，需要随机发送时请重新核对勾选项。任务创建时已固定抽取结果并保存内容、附件副本，删除原模板或重启恢复都不会重新抽取。</p></div></div>
+          </div>
+        </div>
+        <div id="help-mailbox" class="panel">
+          <div class="panel-title"><h2>邮件汇总：集中查看收件和发件</h2><span>包括各账号的收件箱、已发送文件夹和本应用成功发送的记录。</span></div>
+          <div class="help-card">
+            <div class="help-step"><span class="help-num">1</span><div><strong>同步远程邮箱</strong><p>按下方说明开启 IMAP 后，进入“邮件汇总”，点击“同步全部邮箱”。选择一个账号后，按钮变为“同步当前邮箱”。每次为每个账号的收件箱和已发送文件夹各补充最多 100 封，优先获取新邮件；继续同步可补全历史，单个账号失败不影响其他账号。</p></div></div>
+            <div class="help-step"><span class="help-num">2</span><div><strong>筛选、搜索和阅读</strong><p>选择账号、收件箱或已发送，输入主题或往来地址后点击“搜索”。点击邮件查看正文，使用分页按钮翻页。列表缓存在本机；首次查看正文需要连接邮箱，已缓存的正文可以离线阅读。查看不会更改原邮箱的已读状态。</p></div></div>
+            <div class="help-step"><span class="help-num">3</span><div><strong>区分同步与刷新</strong><p>“刷新列表”只读取本机记录；获取远程新邮件需点击同步。本应用成功发送的邮件标记为“本机发送”，无需 IMAP 也能查看。可识别的同封远程副本会自动合并，旧版记录可能显示两个来源；服务器接受邮件不代表收件人已最终收到。</p></div></div>
+            <div class="help-step"><span class="help-num">4</span><div><strong>检查同步状态和阅读限制</strong><p>展开“同步状态与设置”可查看错误、缓存数量、最近同步时间并进入账号“设置”。关闭群发的账号仍会参与同步。HTML 邮件转为纯文本，不加载远程图片；附件只展示名称，请到原邮箱打开。较大邮件最多读取 10 MiB、展示 50 万字符，超限会提示内容截断。</p></div></div>
+          </div>
+        </div>
+        <div id="help-auth" class="panel">
           <div class="panel-title">
-            <h2>如何获取 QQ 邮箱 SMTP 授权码</h2>
-            <span>配置发送邮箱时的授权码不是 QQ 密码</span>
+            <h2>授权码与 IMAP 配置</h2>
+            <span>以 QQ 邮箱为例；其他服务商请使用对应的服务器和授权方式。</span>
           </div>
           <div class="help-card">
-            <div class="help-step">
-              <span class="help-num">1</span>
-              <div>
-                <strong>登录 QQ 邮箱</strong>
-                <p>打开 <a href="https://mail.qq.com" target="_blank">mail.qq.com</a>，使用你的 QQ 账号登录邮箱。</p>
-              </div>
-            </div>
-            <div class="help-step">
-              <span class="help-num">2</span>
-              <div>
-                <strong>进入设置页面</strong>
-                <p>点击顶部导航栏的 <b>"设置"</b> → <b>"账号与安全"</b> → <b>"安全设置"</b>。</p>
-              </div>
-            </div>
-            <div class="help-step">
-              <span class="help-num">3</span>
-              <div>
-                <strong>生成授权码</strong>
-                <p>在 <b>"安全设置"</b> 中找到 <b>"生成授权码"</b> 按钮并点击，按提示通过手机短信验证。生成的 <b>16 位字母授权码</b> 就是你需要填写的 SMTP 授权码。</p>
-              </div>
-            </div>
-            <div class="help-step">
-              <span class="help-num">4</span>
-              <div>
-                <strong>填写到本系统</strong>
-                <p>复制授权码，回到 <b>"邮箱集群"</b> 页面，添加邮箱时将授权码粘贴到 <b>"授权码"</b> 输入框中即可。</p>
-              </div>
-            </div>
+            <div class="help-step"><span class="help-num">1</span><div><strong>在服务商处开启服务并获取授权码</strong><p>在系统浏览器中打开 mail.qq.com 并登录，在设置中找到账号、第三方客户端或 POP3/IMAP/SMTP 相关选项。按页面提示开启 IMAP/SMTP 服务并完成安全验证，生成用于客户端登录的授权码。网页入口可能调整，请以当前页面为准；这里使用授权码，而不是 QQ 登录密码。</p></div></div>
+            <div class="help-step"><span class="help-num">2</span><div><strong>填写 SMTP 发信设置</strong><p>回到“邮箱集群”，添加或编辑账号，将授权码填入“SMTP授权码”。QQ 常用发信地址为 smtp.qq.com，端口 465（SSL/TLS）。编辑时留空保留原授权码；授权码失效后，需要在服务商处重新生成并更新。</p></div></div>
+            <div class="help-step"><span class="help-num">3</span><div><strong>填写 IMAP 汇总设置</strong><p>展开“收发邮件汇总 · IMAP 设置”。IMAP 与 SMTP 共用此账号的授权码；地址留空时按常见 SMTP 服务器自动识别。QQ 使用 imap.qq.com、端口 993、SSL/TLS。自定义服务商需手动填写；选用 STARTTLS 时同时填写服务商提供的对应端口。</p></div></div>
+            <div class="help-step"><span class="help-num">4</span><div><strong>指定已发送文件夹</strong><p>“已发送文件夹”默认自动识别；若同步提示未找到，请填入原邮箱中的文件夹名称后重新同步。修改 IMAP 配置或授权码会清理远程同步缓存，保留本机发送记录；更换邮箱地址或删除账号会移除该账号的汇总缓存。</p></div></div>
           </div>
-          <div class="help-note">
-            <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14">
-              <path d="M8 1a7 7 0 110 14A7 7 0 018 1zm0 1.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zm.5 7V12h-1V9.5h1zm-.5-4a1.5 1.5 0 011.5 1.5c0 .6-.3 1.1-.7 1.4l-.3.2A1 1 0 007.5 10h1a1.8 1.8 0 00.5-2.7 1.5 1.5 0 00-2.5-1A1.5 1.5 0 007 7.5H6a2.5 2.5 0 113.2-2.4A2.5 2.5 0 018 7.5z"/>
-            </svg>
-            <span>QQ 邮箱 SMTP 服务器地址为 <code>smtp.qq.com</code>，端口使用 <code>465</code>（SSL 加密）。如果你使用的是其他邮箱（如 163、Gmail），请使用对应的 SMTP 地址和端口。</span>
+          <p class="help-note">当前支持授权码或应用密码登录，暂不支持仅允许 OAuth 登录的账号。仅开通 SMTP 并不能保证可以读取邮件，汇总功能还需要开通 IMAP。</p>
+        </div>
+        <div id="help-recovery" class="panel">
+          <div class="panel-title"><h2>任务暂停、恢复与重复发送</h2><span>已创建任务会保存发送进度和内容副本。</span></div>
+          <div class="help-card">
+            <div class="help-step"><span class="help-num">1</span><div><strong>关闭窗口时暂停</strong><p>有活动任务时关闭窗口，程序会询问是否“暂停并退出”。确认后会等待正在发送的邮件返回结果，保留其他未发送项；请等待程序完成退出。</p></div></div>
+            <div class="help-step"><span class="help-num">2</span><div><strong>重启后继续未发送项</strong><p>重新启动后，在首页找到已中断任务，点击“继续未发送”。系统会再次检查发送账号和收件人状态，已成功项不会自动重发，随机模板的原抽取结果也会保留。</p></div></div>
+            <div class="help-step"><span class="help-num">3</span><div><strong>先核对结果未知的邮件</strong><p>异常断电或中断时，部分邮件可能已被服务器接受。遇到待核对项，应先检查原邮箱或收件方，再决定是否点击“核对后重试”。失败邮件可在任务详情和数据面板中排查原因，修正后仅为需要重试的收件人创建任务。</p></div></div>
+          </div>
+        </div>
+        <div id="help-data" class="panel">
+          <div class="panel-title"><h2>桌面窗口、数据备份与升级</h2><span>安装版和免安装版均包含运行环境，无需安装 Python 或 Node.js。</span></div>
+          <div class="help-card">
+            <div class="help-step"><span class="help-num">1</span><div><strong>窗口操作</strong><p>拖动顶部深色标题区域可移动窗口，右上角支持最小化、最大化、关闭和打开数据文件夹。窗口最右侧滚动条已隐藏，仍可通过滚轮、触控板滚动；列表和弹窗中的内容也可以滚动查看。</p></div></div>
+            <div class="help-step"><span class="help-num">2</span><div><strong>备份和升级</strong><p>默认数据目录为 %APPDATA%\MailGroup\data，以标题栏文件夹按钮打开的位置为准。备份前关闭应用，再复制整个 data 文件夹，保留数据库和附件。升级替换程序不会删除已有数据；不要让不同版本同时操作同一份数据。旧版迁移步骤见随程序提供的“使用说明.txt”。</p></div></div>
+          </div>
+          <p class="help-note">数据目录包含邮箱授权码、邮件正文、联系人和附件。不要上传到 GitHub 或分享完整备份；提供日志或截图前，请先删除授权码、个人邮箱地址及邮件内容。</p>
+        </div>
+        <div id="help-faq" class="panel">
+          <div class="panel-title"><h2>常见问题</h2><span>按页面提示处理后再重试。</span></div>
+          <div class="help-card help-faq">
+            <details><summary>“开始群发”按钮不可用</summary><p>检查是否有启用的发送账号和收件人；修改收件人输入后需完成“解析”。当前编辑模式需填写主题和正文，模板附件需加载完成；随机模式至少勾选一个已保存模板。</p></details>
+            <details><summary>模板编辑区变灰，或附件加载失败</summary><p>随机模式下编辑区会停用，请切换“当前编辑内容”或点击“载入编辑”。附件加载失败时发送会被阻止，请重试载入或改选附件完整的模板。单个发信附件最多 50MB，程序会拦截 exe、bat、cmd、js 等类型，服务商还可能有更严格限制。</p></details>
+            <details><summary>能发送，但邮件汇总失败或没有已发送邮件</summary><p>检查 IMAP 是否开启、授权码是否有效，以及 IMAP 地址、端口和加密方式。未识别已发送文件夹时可手动指定；账号使用 OAuth 强制认证时暂不支持同步。服务商未保存的发信副本无法通过 IMAP 读取，本应用成功发送的记录仍可通过“刷新列表”查看。</p></details>
+            <details><summary>收件人发送后变成禁用状态</summary><p>这是成功发送后的防重复处理。请先确认确需再次发送，再在“目标邮箱”启用指定收件人；批量“全部启用”也会重新启用已成功发送的地址。</p></details>
           </div>
         </div>
       </section>
@@ -4331,6 +4349,15 @@ th:has(.help-icon-wrap) {
   gap: 16px;
   padding: 16px 20px 20px;
 }
+
+.help-topics { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.help-topics a { padding: 8px 12px; border: 1px solid #dce5ef; border-radius: 8px; background: #fff; color: #315c91; text-decoration: none; font-size: 13px; }
+.help-topics a:hover { background: #eef5ff; }
+.help-guide .panel { scroll-margin-top: 60px; }
+.help-faq details { border-bottom: 1px solid #edf0f5; padding-bottom: 12px; }
+.help-faq details:last-child { border-bottom: 0; }
+.help-faq summary { cursor: pointer; color: #33465d; font-size: 14px; font-weight: 600; }
+.help-faq p { margin: 10px 0 0; font-size: 13px; line-height: 1.8; color: #475569; }
 
 .help-step {
   display: flex;
